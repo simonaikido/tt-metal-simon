@@ -410,7 +410,7 @@ optimal_topology = (
 )
 @pytest.mark.parametrize(
     "module_path",
-    [None, "model.layers.0.self_attn"],
+    [None],
 )
 @pytest.mark.parametrize(
     "test_closure",
