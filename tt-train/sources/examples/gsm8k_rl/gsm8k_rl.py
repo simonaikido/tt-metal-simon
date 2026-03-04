@@ -1,10 +1,7 @@
-# Objective: Take a GPT2 model that can complete sentences, and then train it to solve math problems from GSM8K.
-# Currently the reward is the negative answer length, meaning we don't prioritize correct answers, just short answers.
-
 from transformers import AutoTokenizer, AutoTokenizer
 from huggingface_hub import snapshot_download
 from ttml.common.model_factory import TransformerModelFactory
-from ttml.common.utils import set_seed
+from ttml.common.utils import initialize_device, set_seed
 import ttnn
 import ttml
 import os
@@ -29,44 +26,17 @@ from ttml.common.utils import (
 )
 
 tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_ID)
-
-
-def _round_up_to_tile(x: int, tile: int = 32) -> int:
-    return ((x + tile - 1) // tile) * tile
-
-
-def _build_causal_mask_ttml(device, query_len: int, processed_tokens: int = 0):
-    """
-    query_len: number of tokens in current forward
-    processed_tokens: number of tokens already in KV cache (prefix length)
-    """
-    whole_len = processed_tokens + query_len
-    padded_q = _round_up_to_tile(query_len)
-    padded_k = _round_up_to_tile(whole_len)
-
-    mask_np = np.zeros((padded_q, padded_k), dtype=np.float32)
-    for i in range(query_len):
-        # query i can attend up to (processed_tokens + i)
-        mask_np[i, : processed_tokens + i + 1] = 1.0
-
-    return ttml.autograd.Tensor.from_numpy(
-        mask_np.reshape(1, 1, padded_q, padded_k),
-        layout=ttnn.Layout.TILE,
-        new_type=ttnn.DataType.BFLOAT16,
-    )
-
-
-def _tokens_to_ttml_uint32(tokens, device=None):
-    actual_len = len(tokens)
-    padded_len = _round_up_to_tile(actual_len)
-    arr = np.zeros((padded_len,), dtype=np.uint32)
-    arr[:actual_len] = np.asarray(tokens, dtype=np.uint32)
-    t = ttml.autograd.Tensor.from_numpy(
-        arr.reshape(1, 1, 1, padded_len),
-        layout=ttnn.Layout.ROW_MAJOR,
-        new_type=ttnn.DataType.UINT32,
-    )
-    return t, actual_len
+vocab_size: int = tokenizer.vocab_size
+temperature: float = 0
+max_tokens_to_complete: int = 20
+num_layers: int = 30
+num_groups: int = 3
+embedding_dim: int = 576
+num_heads: int = 9
+max_sequence_length: int = 128
+device = None
+seed = 42
+tile_size: int = 32
 
 
 class InferenceOutput:
@@ -78,6 +48,11 @@ class InferenceOutput:
         self.prompt_ids = prompt_ids
         self.completion_ids = completion_ids
         self.token_logprobs = token_logprobs
+
+
+def get_device():
+    ctx = ttml.autograd.AutoContext.get_instance()
+    return ctx.get_device()
 
 
 def _safe_deallocate(ttnn_tensor):
@@ -97,180 +72,139 @@ def _deallocate_list(ttml_tensors):
         _safe_deallocate(x.get_value())
 
 
-def _extract_token_logprob_from_last_logits(last_logits_tt, token_id: int) -> float:
-    """
-    last_logits_tt: TT tensor shape [1,1,1,V]
-    Convert once to numpy, compute log-softmax on CPU for scalar logprob.
-    This is inference-only and then we free TT tensor.
-    """
-    logits_np = ttnn.to_torch(last_logits_tt).float().cpu().numpy().reshape(-1)
-    m = np.max(logits_np)
-    logsumexp = m + np.log(np.sum(np.exp(logits_np - m)))
-    return float(logits_np[token_id] - logsumexp)
+def round_to_tile(x: int) -> int:
+    return ((x + tile_size - 1) // tile_size) * tile_size
 
 
-def _forward_last_logits_with_cache(
-    tt_model,
-    tokens: List[int],
-    *,
-    kv_cache,
-    processed_tokens: int,
-    vocab_size: int,
-):
-    """
-    Returns last-position logits TT tensor of shape [1,1,1,V].
-    Caller owns returned tensor and must deallocate it.
-    Internals are deallocated here.
-    """
-    x = mask = logits = tt_logits = None
-    try:
-        x, new_tokens = _tokens_to_ttml_uint32(tokens)
-        mask = _build_causal_mask_ttml(
-            x.get_value().device(),
-            query_len=new_tokens,
-            processed_tokens=processed_tokens,
+def tokens_to_model_tensor(tokens: List[int], device=None):
+    tokens_len = len(tokens)
+    padded_len = round_to_tile(tokens_len)
+
+    arr = np.zeros((padded_len,), dtype=np.uint32)
+    arr[:tokens_len] = np.asarray(tokens, dtype=np.uint32)
+
+    t = ttml.autograd.Tensor.from_numpy(
+        arr.reshape(1, 1, 1, padded_len),
+        layout=ttnn.Layout.ROW_MAJOR,
+        new_type=ttnn.DataType.UINT32,
+    )
+
+    return t
+
+
+# Generates [1, 1, len, len] lower-triangular tensor
+# with everything below a diagonal set to 1.
+# The diagonal and everything above it is 0.
+# It is a ttml::Tensor
+# grads are not tracked in the casual mask
+def generate_casual_mask(query_len: int, processed_tokens: int):
+    assert (query_len > 0 and processed_tokens == 0) or (
+        query_len == 1 and processed_tokens > 0
+    )
+
+    if processed_tokens == 0:
+        n = query_len
+        padded_n = round_to_tile(n)
+
+        m = np.zeros((padded_n, padded_n), dtype=np.uint32)
+        m[:n, :n] = np.tril(np.ones((n, n), dtype=np.uint32))
+
+        return ttml.autograd.Tensor.from_numpy(
+            m.reshape(1, 1, padded_n, padded_n),
+            layout=ttnn.Layout.ROW_MAJOR,
+            new_type=ttnn.DataType.BFLOAT16,
+        )
+    else:
+        n = processed_tokens + 1
+        padded_n = round_to_tile(n)
+
+        m = np.zeros((tile_size, padded_n), dtype=np.uint32)
+        m[0, :n] = 1
+
+        return ttml.autograd.Tensor.from_numpy(
+            m.reshape(1, 1, tile_size, padded_n),
+            layout=ttnn.Layout.ROW_MAJOR,
+            new_type=ttnn.DataType.BFLOAT16,
         )
 
-        logits = tt_model(x, mask, kv_cache, new_tokens)
-        tt_logits = logits.get_value()
 
-        # last position in this chunk
-        idx = new_tokens - 1
-        last_logits = ttnn.slice(
-            tt_logits,
-            [0, 0, idx, 0],
-            [1, 1, idx + 1, vocab_size],
+# Returns a token from raw logits
+def sample_token(logits):
+    n, m, k, V = logits.shape()
+    assert n == 1 and m == 1 and k == 1
+
+    if temperature < 0.01:
+        argmax_result = ttnn.argmax(logits.get_value(), dim=3, keepdim=True)
+        next_token = int(argmax_result.item())
+        next_token = min(next_token, vocab_size - 1)
+    else:
+        sampled = ttml.ops.sample.sample_op(logits, temperature, seed, None)
+        next_token = int(sampled.get_value().item())
+
+    return next_token
+
+
+class DecodeState:
+    def __init__(self, tokens: List[int]):
+        head_dim = embedding_dim // num_heads
+        cfg = ttml.models.KvCacheConfig(
+            num_layers, 1, num_groups, max_sequence_length, head_dim
         )
-        return last_logits
-    finally:
-        if x is not None:
-            _safe_deallocate(x.get_value())
-        if mask is not None:
-            _safe_deallocate(mask.get_value())
-        if tt_logits is not None:
-            _safe_deallocate(tt_logits)
+        self.kv_cache = ttml.models.KvCache(cfg)
+        self.kv_cache.reset()
+        self.tokens = tokens[:]
+        self.prefilled = False
 
 
-def model_inference(
-    tt_model,
-    tokenizer,
-    prompt_ids,
-    *,
-    mode: str,  # "sample" | "score"
-    completion_ids=None,  # required when mode="score"
-    max_new_tokens: int = 64,  # used when mode="sample"
-    temperature: float = 0.8,
-    max_t: int = 200,
-    num_layers: int = 30,
-    num_groups: int = 3,
-    embedding_dim: int = 576,
-    num_heads: int = 9,
-):
-    assert mode in {"sample", "score"}
-    if mode == "score":
-        assert completion_ids is not None and len(completion_ids) > 0
+def complete_token(state: DecodeState) -> int:
+    # step_tokens == tokens we are about to compute on in this call of complete_token.
+    if not state.prefilled:
+        step_tokens = state.tokens
+        state.prefilled = True
 
-    ids = list(prompt_ids)
-    print(f"model_inference, f{len(ids)=}, {max_t=}, {max_new_tokens=}")
-    assert len(ids) < max_t, f"Prompt too long: {len(ids)} >= {max_t}"
+        processed_tokens = 0
+        step_tokens_len = len(step_tokens)
+    else:
+        step_tokens = [state.tokens[-1]]
+
+        processed_tokens = len(state.tokens) - 1
+        step_tokens_len = 1
+
+    padded_step_len = round_to_tile(step_tokens_len)
+    input_tensor = tokens_to_model_tensor(step_tokens)
+    mask_tensor = generate_casual_mask(step_tokens_len, processed_tokens)
+
+    logits = tt_model(
+        input_tensor, mask_tensor, kv_cache=state.kv_cache, new_tokens=len(step_tokens)
+    )
+
+    n, m, k, V = logits.shape()
+    assert n == 1 and m == 1 and k == padded_step_len
+
+    sliced = ttnn.slice(
+        logits.get_value(), [0, 0, step_tokens_len - 1, 0], [1, 1, step_tokens_len, V]
+    )
+
+    assert sliced.shape == [1, 1, 1, V]
+
+    last_logits = ttml.autograd.Tensor(sliced, False)  # no grad
+
+    next_token = sample_token(last_logits)
+    state.tokens.append(next_token)
+    return next_token
+
+
+def complete_tokens(input_tokens: List[int]):
+    state = DecodeState(input_tokens)
 
     tt_model.eval()
-    vocab_size = tokenizer.vocab_size
-    head_dim = embedding_dim // num_heads
+    with no_grad():
+        for _ in range(max_tokens_to_complete):
+            token = complete_token(state)
+            if token == tokenizer.eos_token_id:
+                break
 
-    kv_cfg = ttml.models.KvCacheConfig(num_layers, 1, num_groups, max_t, head_dim)
-    kv_cache = ttml.models.KvCache(kv_cfg)
-    kv_cache.reset()
-
-    generated: List[int] = []
-    token_logprobs: List[float] = []
-
-    # ---- Prefill: score/sample first completion token from prompt ----
-    last_logits = None
-    try:
-        last_logits = _forward_last_logits_with_cache(
-            tt_model,
-            ids,
-            kv_cache=kv_cache,
-            processed_tokens=0,
-            vocab_size=vocab_size,
-        )
-
-        if mode == "sample":
-            sampled = ttml.ops.sample.sample_op(
-                ttml.autograd.Tensor(last_logits, False),
-                temperature,
-                np.random.randint(0, 2**32 - 1),
-                None,
-            )
-            next_token = int(sampled.get_value().item())
-            _safe_deallocate(sampled.get_value())
-
-            if next_token != tokenizer.eos_token_id:
-                lp = _extract_token_logprob_from_last_logits(last_logits, next_token)
-                token_logprobs.append(lp)
-                generated.append(next_token)
-        else:
-            tgt = completion_ids[0]
-            lp = _extract_token_logprob_from_last_logits(last_logits, tgt)
-            token_logprobs.append(lp)
-            generated.append(tgt)
-    finally:
-        _safe_deallocate(last_logits)
-
-    if mode == "sample" and len(generated) == 0:
-        return InferenceOutput(prompt_ids=ids, completion_ids=[], token_logprobs=[])
-
-    # ---- Decode loop ----
-    steps = (max_new_tokens - 1) if mode == "sample" else (len(completion_ids) - 1)
-
-    for i in range(max(0, steps)):
-        if len(ids) + len(generated) >= max_t:
-            break
-
-        prev_token = generated[-1]
-        processed_tokens = kv_cache.get_cache_position()
-
-        last_logits = None
-        try:
-            last_logits = _forward_last_logits_with_cache(
-                tt_model,
-                [prev_token],
-                kv_cache=kv_cache,
-                processed_tokens=processed_tokens,
-                vocab_size=vocab_size,
-            )
-
-            if mode == "sample":
-                sampled = ttml.ops.sample.sample_op(
-                    ttml.autograd.Tensor(last_logits, False),
-                    temperature,
-                    np.random.randint(0, 2**32 - 1),
-                    None,
-                )
-                tok = int(sampled.get_value().item())
-                _safe_deallocate(sampled.get_value())
-
-                if tok == tokenizer.eos_token_id:
-                    break
-
-                lp = _extract_token_logprob_from_last_logits(last_logits, tok)
-                token_logprobs.append(lp)
-                generated.append(tok)
-            else:
-                tgt = completion_ids[i + 1]
-                lp = _extract_token_logprob_from_last_logits(last_logits, tgt)
-                token_logprobs.append(lp)
-                generated.append(tgt)
-        finally:
-            _safe_deallocate(last_logits)
-
-    # no explicit kv_cache tensor free API exposed here; cache will be released with object lifetime
-    return InferenceOutput(
-        prompt_ids=ids,
-        completion_ids=generated,
-        token_logprobs=token_logprobs,
-    )
+        return state.tokens[len(input_tokens) :]
 
 
 def tokenize_dataset(data, tokenizer: AutoTokenizer):
@@ -300,7 +234,6 @@ def train_gsm8k(tt_model, optimizer, max_steps=1000, group_size=2, max_new_token
     X, _ = tokenize_dataset(train_data, tokenizer)
 
     # You likely already have this from model config
-    max_sequence_length = 128
     causal_mask_np = np.tril(
         np.ones((max_sequence_length, max_sequence_length), dtype=np.float32)
     )
@@ -492,21 +425,26 @@ if __name__ == "__main__":
     training_config = load_training_config()
     print(training_config)
 
+    initialize_device(training_config)
+
     tt_model = create_model(training_config)
     print(tt_model.__dir__())
 
     prompt = "The capital of France is"
-    input_ids = tokenizer.encode(prompt)
+    input_tokens = tokenizer.encode(prompt)
 
-    inference_output = model_inference(
-        tt_model, tokenizer=tokenizer, prompt_ids=input_ids, mode="sample"
-    )
+    completed_tokens = complete_tokens(input_tokens)
+    print("Prompt + Generated = ")
+    print(tokenizer.decode(input_tokens + completed_tokens))
 
-    generated_text = tokenizer.decode(
-        inference_output.completion_ids, skip_special_tokens=False
-    )
-    print(f"\nPrompt: {prompt}")
-    print(f"Generated: {generated_text}")
+    # inference_output = model_inference(
+    #     tt_model, tokenizer=tokenizer, prompt_ids=input_ids, mode="sample"
+    # )
 
-    optim = create_optimizer(tt_model, training_config)
-    train_gsm8k(tt_model, optimizer=optim)
+    # generated_text = tokenizer.decode(
+    #     inference_output.completion_ids, skip_special_tokens=False
+    # )
+    # print(f"\nPrompt: {prompt}")
+    # print(f"Generated: {generated_text}")
+
+    # train_gsm8k(tt_model, optimizer=optim)
