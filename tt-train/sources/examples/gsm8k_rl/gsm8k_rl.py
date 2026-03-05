@@ -241,8 +241,7 @@ def iter_pass(total: int, chunk: int):
 # for every i, j \in [0, B-1]x[0, T-1]
 # tokens_nlog[i,j] = -log(prob(token[i,j])), where
 # token[i,j] = vocab[targets_np[i,j]]
-def compute_nlog_probs(inputs_np, targets_np) -> Any:
-    B, T = inputs_np.shape
+def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
     x_np = inputs_np.astype(np.uint32).reshape(B, 1, 1, T)
 
     X_tt = ttml.autograd.Tensor.from_numpy(
@@ -263,6 +262,8 @@ def compute_nlog_probs(inputs_np, targets_np) -> Any:
     tokens_nlog = ttml.ops.loss.cross_entropy_loss(
         logits, targets_tt, ttml.ops.ReduceType.NONE
     )
+
+    tokens_nlog = ttml.ops.reshape.reshape(tokens_nlog, [B, T])
 
     return tokens_nlog
 
@@ -291,8 +292,7 @@ def generate_inputs_targets(sequences_np):
     return inputs_np, targets_np
 
 
-def ignore_probs(probs_tt, l_np, r_np):
-    B, T = probs_tt.shape()
+def ignore_probs(probs_tt, l_np, r_np, B, T):
     assert l_np.shape == (B,) and r_np.shape == (B,)
 
     # Build keep-mask on host (fast/simple), then apply with TTML mul
@@ -312,8 +312,10 @@ def ignore_probs(probs_tt, l_np, r_np):
     return ttml.ops.binary.mul(probs_tt, keep_tt)
 
 
-def calculate_loss(nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int):
-    B, T = nlog_probs_tt.shape()
+def calculate_loss(
+    nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int, B: int, T: int
+):
+    assert nlog_probs_tt.shape() == (B, T - 1)
 
     # completion token counts per row (avoid divide-by-zero)
     comp_lens_np = np.maximum(
@@ -321,6 +323,8 @@ def calculate_loss(nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int):
     )  # [B]
 
     row_scale_np = (float(T) / comp_lens_np).reshape(B, 1)  # [B,1]
+    row_ = np.repeat(advantages_pass, T - 1, axis=1).astype(np.float32)
+
     row_scale_tt = ttml.autograd.Tensor.from_numpy(
         row_scale_np,
         layout=ttnn.Layout.ROW_MAJOR,
@@ -328,6 +332,7 @@ def calculate_loss(nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int):
     )
 
     adv_scaled_tt = ttml.ops.binary.mul(advantages_tt, row_scale_tt)  # [B,1]
+
     weighted_tt = ttml.ops.binary.mul(
         nlog_probs_tt, adv_scaled_tt
     )  # [B,T] via broadcast
@@ -341,6 +346,7 @@ def train_gsm8k(max_steps: int = 100):
     X, _ = tokenize_dataset(train_data, tokenizer)
     print("Loaded GSM8K dataset!")
 
+    tt_model.train()
     for step in range(min(max_steps, len(X))):
         prompt: Tokens = X[step].tolist()
 
@@ -356,7 +362,6 @@ def train_gsm8k(max_steps: int = 100):
             completions.append(c)
             rewards.append(r)
 
-        completions = np.asarray(completions, dtype=np.int32)
         rewards_np = np.asarray(rewards, dtype=np.float32)
         advantages_np = rewards_np - rewards_np.mean()
 
@@ -371,19 +376,25 @@ def train_gsm8k(max_steps: int = 100):
 
             # sequences is of shape BxT, length is of shape (B)
             sequences_np, lengths_np = generate_sequences(prompt, completions, start, B)
+            T = sequences_np.shape[1]
             inputs_np, targets_np = generate_inputs_targets(sequences_np)
 
             nlog_probs = compute_nlog_probs(inputs_np, targets_np)
 
-            l_np = np.full((B,), len(prompt), dtype=np.uint32)
-            r_np = lengths_np
+            l_np = np.full((B,), len(prompt) - 1, dtype=np.uint32)
+            r_np = lengths_np - 2
             nlog_probs = ignore_probs(nlog_probs, l_np, r_np)
 
-            advantages_pass = advantages_np[start : start + B]
+            advantages_pass = advantages_np[start : start + B].reshape((B, 1))
+            advantages_pass = np.repeat(advantages_pass, T - 1, axis=1).astype(
+                np.float32
+            )  # [B,T-1]
+            assert advantages_pass.shape == (B, T - 1)
+
             advantages_pass_tt = ttml.autograd.Tensor.from_numpy(
                 advantages_pass,
                 layout=ttnn.Layout.ROW_MAJOR,
-                new_type=ttnn.DataType.UINT32,
+                new_type=ttnn.DataType.BFLOAT16,
             )
 
             loss = calculate_loss(
