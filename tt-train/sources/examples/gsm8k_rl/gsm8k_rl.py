@@ -8,7 +8,7 @@ import os
 import numpy as np
 import datasets
 import time
-from typing import List, TypeAlias
+from typing import List, TypeAlias, Any
 
 CONFIG = "training_gsm8k_rl_llama.yaml"
 HF_MODEL_ID = "HuggingFaceTB/SmolLM2-135M"
@@ -243,7 +243,7 @@ def iter_pass(total: int, chunk: int):
 # token[i,j] = vocab[targets_np[i,j]]
 def compute_nlog_probs(inputs_np, targets_np) -> Any:
     B, T = inputs_np.shape
-    x_np = inputs_np.as_type(np.uint32).reshape(B, 1, 1, T)
+    x_np = inputs_np.astype(np.uint32).reshape(B, 1, 1, T)
 
     X_tt = ttml.autograd.Tensor.from_numpy(
         x_np,
@@ -359,10 +359,6 @@ def train_gsm8k(max_steps: int = 100):
         completions = np.asarray(completions, dtype=np.int32)
         rewards_np = np.asarray(rewards, dtype=np.float32)
         advantages_np = rewards_np - rewards_np.mean()
-        advantages_tt = ttml.autograd.Tensor(
-            ttnn.reshape(advantages_np.get_value(), [B, 1]),
-            False,
-        )
 
         # ------------------------------------
         # PHASE 2: differentiable policy update
@@ -383,7 +379,16 @@ def train_gsm8k(max_steps: int = 100):
             r_np = lengths_np
             nlog_probs = ignore_probs(nlog_probs, l_np, r_np)
 
-            loss = calculate_loss(nlog_probs, advantages_tt, lengths_np, len(prompt))
+            advantages_pass = advantages_np[start : start + B]
+            advantages_pass_tt = ttml.autograd.Tensor.from_numpy(
+                advantages_pass,
+                layout=ttnn.Layout.ROW_MAJOR,
+                new_type=ttnn.DataType.UINT32,
+            )
+
+            loss = calculate_loss(
+                nlog_probs, advantages_pass_tt, lengths_np, len(prompt)
+            )
 
             loss.backward()
 
@@ -462,14 +467,5 @@ if __name__ == "__main__":
     print("Prompt + Generated = ")
     print(tokenizer.decode(input_tokens + completed_tokens))
 
-    # inference_output = model_inference(
-    #     tt_model, tokenizer=tokenizer, prompt_ids=input_ids, mode="sample"
-    # )
-
-    # generated_text = tokenizer.decode(
-    #     inference_output.completion_ids, skip_special_tokens=False
-    # )
-    # print(f"\nPrompt: {prompt}")
-    # print(f"Generated: {generated_text}")
-
-    # train_gsm8k(tt_model, optimizer=optim)
+    optimizer = create_optimizer(tt_model, training_config)
+    train_gsm8k(max_steps=100)
