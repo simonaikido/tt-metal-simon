@@ -8,7 +8,7 @@ import os
 import numpy as np
 import datasets
 import time
-from typing import List
+from typing import List, TypeAlias
 
 CONFIG = "training_gsm8k_rl_llama.yaml"
 HF_MODEL_ID = "HuggingFaceTB/SmolLM2-135M"
@@ -34,20 +34,20 @@ num_groups: int = 3
 embedding_dim: int = 576
 num_heads: int = 9
 max_sequence_length: int = 128
-device = None
 seed = 42
 tile_size: int = 32
+group_size: int = 8
+optimizer = None
 
+Token: TypeAlias = int
+Tokens: TypeAlias = List[int]
+Completion: TypeAlias = List[int]
+Completions: TypeAlias = List[List[int]]
+Reward: TypeAlias = float
 
-class InferenceOutput:
-    prompt_ids: List[int]
-    completion_ids: List[int]
-    token_logprobs: List[float]
-
-    def __init__(self, prompt_ids, completion_ids, token_logprobs):
-        self.prompt_ids = prompt_ids
-        self.completion_ids = completion_ids
-        self.token_logprobs = token_logprobs
+pad_token = tokenizer.pad_token_id
+if pad_token is None:
+    pad_token = tokenizer.eos_token_id
 
 
 def get_device():
@@ -76,11 +76,11 @@ def round_to_tile(x: int) -> int:
     return ((x + tile_size - 1) // tile_size) * tile_size
 
 
-def tokens_to_model_tensor(tokens: List[int], device=None):
+def tokens_to_model_tensor(tokens: List[int]):
     tokens_len = len(tokens)
     padded_len = round_to_tile(tokens_len)
 
-    arr = np.zeros((padded_len,), dtype=np.uint32)
+    arr = np.full((padded_len,), pad_token, dtype=np.uint32)
     arr[:tokens_len] = np.asarray(tokens, dtype=np.uint32)
 
     t = ttml.autograd.Tensor.from_numpy(
@@ -92,6 +92,7 @@ def tokens_to_model_tensor(tokens: List[int], device=None):
     return t
 
 
+# TODO: update the description of this function
 # Generates [1, 1, len, len] lower-triangular tensor
 # with everything below a diagonal set to 1.
 # The diagonal and everything above it is 0.
@@ -194,7 +195,7 @@ def complete_token(state: DecodeState) -> int:
     return next_token
 
 
-def complete_tokens(input_tokens: List[int]):
+def complete_tokens(input_tokens: List[int]) -> Completion:
     state = DecodeState(input_tokens)
 
     tt_model.eval()
@@ -223,148 +224,172 @@ def tokenize_dataset(data, tokenizer: AutoTokenizer):
     return tok(X), tok(y)
 
 
-def reward_fn_from_completion_ids(completion_ids):
+def get_reward(c: Completion) -> Reward:
     # Example reward: shorter completion is better
-    return -float(len(completion_ids))
+    return -float(len(c))
 
 
-def train_gsm8k(tt_model, optimizer, max_steps=1000, group_size=2, max_new_tokens=8):
+def iter_pass(total: int, chunk: int):
+    full, rem = divmod(total, chunk)
+    for _ in range(full):
+        yield chunk
+    if rem:
+        yield rem
+
+
+# Takes np.arrays 'inputs_np', 'targets_np', returns a ttml tensor 'tokens_nlog', where
+# for every i, j \in [0, B-1]x[0, T-1]
+# tokens_nlog[i,j] = -log(prob(token[i,j])), where
+# token[i,j] = vocab[targets_np[i,j]]
+def compute_nlog_probs(inputs_np, targets_np) -> Any:
+    B, T = inputs_np.shape
+    x_np = inputs_np.as_type(np.uint32).reshape(B, 1, 1, T)
+
+    X_tt = ttml.autograd.Tensor.from_numpy(
+        x_np,
+        layout=ttnn.Layout.ROW_MAJOR,
+        new_type=ttnn.DataType.UINT32,
+    )
+
+    mask_tensor = generate_casual_mask(T, 0)  # [1, 1, T, T]
+    logits = tt_model(X_tt, mask_tensor)  # [B, 1, T, V]
+
+    targets_tt = ttml.autograd.Tensor.from_numpy(
+        targets_np,
+        layout=ttnn.Layout.ROW_MAJOR,
+        new_type=ttnn.DataType.UINT32,
+    )
+
+    tokens_nlog = ttml.ops.loss.cross_entropy_loss(
+        logits, targets_tt, ttml.ops.ReduceType.NONE
+    )
+
+    return tokens_nlog
+
+
+# Generates an array of size (B, T), where T is the longest sequence length
+# Returns the sequence array, an array of lengths of shape (B).
+def generate_sequences(prompt: Tokens, completions: Completions, start, B):
+    batch_completions = completions[start : start + B]
+    sequences = [prompt + c for c in batch_completions]
+    T = max(len(s) for s in sequences)
+
+    sequences_np = np.full((B, T), pad_token, dtype=np.int32)
+    lengths_np = np.zeros((B,), dtype=np.int32)
+
+    for i, seq in enumerate(sequences):
+        sequences_np[i, : len(seq)] = np.asarray(seq, dtype=np.int32)
+        lengths_np[i] = len(seq)
+
+    return sequences_np, lengths_np
+
+
+def generate_inputs_targets(sequences_np):
+    inputs_np = sequences_np[:, :-1]
+    targets_np = sequences_np[:, 1:]
+
+    return inputs_np, targets_np
+
+
+def ignore_probs(probs_tt, l_np, r_np):
+    B, T = probs_tt.shape()
+    assert l_np.shape == (B,) and r_np.shape == (B,)
+
+    # Build keep-mask on host (fast/simple), then apply with TTML mul
+    j = np.arange(T, dtype=np.int32)[None, :]  # [1, T]
+    l = l_np.astype(np.int32).reshape(B, 1)  # [B, 1]
+    r = r_np.astype(np.int32).reshape(B, 1)  # [B, 1]
+
+    keep_np = ((j >= l) & (j <= r)).astype(np.float32)  # [B, T], 1 inside, 0 outside
+
+    keep_tt = ttml.autograd.Tensor.from_numpy(
+        keep_np,
+        layout=ttnn.Layout.ROW_MAJOR,
+        new_type=ttnn.DataType.BFLOAT16,
+    )
+
+    # zero-out outside [l, r] per row
+    return ttml.ops.binary.mul(probs_tt, keep_tt)
+
+
+def calculate_loss(nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int):
+    B, T = nlog_probs_tt.shape()
+
+    # completion token counts per row (avoid divide-by-zero)
+    comp_lens_np = np.maximum(
+        lengths_np.astype(np.float32) - float(prompt_len), 1.0
+    )  # [B]
+
+    row_scale_np = (float(T) / comp_lens_np).reshape(B, 1)  # [B,1]
+    row_scale_tt = ttml.autograd.Tensor.from_numpy(
+        row_scale_np,
+        layout=ttnn.Layout.ROW_MAJOR,
+        new_type=ttnn.DataType.BFLOAT16,
+    )
+
+    adv_scaled_tt = ttml.ops.binary.mul(advantages_tt, row_scale_tt)  # [B,1]
+    weighted_tt = ttml.ops.binary.mul(
+        nlog_probs_tt, adv_scaled_tt
+    )  # [B,T] via broadcast
+
+    return ttml.ops.unary.mean(weighted_tt)
+
+
+def train_gsm8k(max_steps: int = 100):
     print("Loading GSM8K dataset...")
     train_data = datasets.load_dataset("openai/gsm8k", "main", split="train")
     X, _ = tokenize_dataset(train_data, tokenizer)
-
-    # You likely already have this from model config
-    causal_mask_np = np.tril(
-        np.ones((max_sequence_length, max_sequence_length), dtype=np.float32)
-    )
-    causal_mask = ttml.autograd.Tensor.from_numpy(
-        causal_mask_np.reshape(1, 1, max_sequence_length, max_sequence_length),
-        ttnn.Layout.ROW_MAJOR,
-        ttnn.DataType.BFLOAT16,
-    )
+    print("Loaded GSM8K dataset!")
 
     for step in range(min(max_steps, len(X))):
-        prompt_ids = X[step].tolist()
+        prompt: Tokens = X[step].tolist()
 
         # -------------------------
         # PHASE 1: sample + rewards
         # -------------------------
-        sampled_completions = []
+        completions = []
         rewards = []
 
-        with no_grad():
-            for _ in range(group_size):
-                out = model_inference(
-                    tt_model,
-                    tokenizer,
-                    prompt_ids,
-                    mode="sample",
-                    max_t=max_sequence_length,
-                    max_new_tokens=max_new_tokens,
-                    temperature=0.8,
-                )
-                sampled_completions.append(out.completion_ids)
-                rewards.append(reward_fn_from_completion_ids(out.completion_ids))
+        for _ in range(group_size):
+            c: Completion = complete_tokens(prompt)
+            r = get_reward(c)
+            completions.append(c)
+            rewards.append(r)
 
-            rewards_np = np.asarray(rewards, dtype=np.float32)
-            advantages_np = (
-                rewards_np - rewards_np.mean()
-            )  # no std division (as requested)
-            # advantages are now constants (detached scalars)
+        completions = np.asarray(completions, dtype=np.int32)
+        rewards_np = np.asarray(rewards, dtype=np.float32)
+        advantages_np = rewards_np - rewards_np.mean()
+        advantages_tt = ttml.autograd.Tensor(
+            ttnn.reshape(advantages_np.get_value(), [B, 1]),
+            False,
+        )
 
         # ------------------------------------
         # PHASE 2: differentiable policy update
         # ------------------------------------
+
         optimizer.zero_grad()
+        start = 0
+        for pass_size in iter_pass(group_size, 4):
+            B = pass_size
 
-        # only for scaling, so gradient matches mean over valid samples
-        valid_count = sum(1 for c in sampled_completions if len(c) > 0)
-        if valid_count == 0:
-            continue
+            # sequences is of shape BxT, length is of shape (B)
+            sequences_np, lengths_np = generate_sequences(prompt, completions, start, B)
+            inputs_np, targets_np = generate_inputs_targets(sequences_np)
 
-        for completion_ids, adv in zip(sampled_completions, advantages_np):
-            if len(completion_ids) == 0:
-                continue
+            nlog_probs = compute_nlog_probs(inputs_np, targets_np)
 
-            # Build one training sequence: prompt + sampled completion
-            seq = prompt_ids + completion_ids
+            l_np = np.full((B,), len(prompt), dtype=np.uint32)
+            r_np = lengths_np
+            nlog_probs = ignore_probs(nlog_probs, l_np, r_np)
 
-            # Teacher forcing setup:
-            # input is seq[:-1], target is seq[1:]
-            inp = seq[:-1]
-            tgt = seq[1:]
+            loss = calculate_loss(nlog_probs, advantages_tt, lengths_np, len(prompt))
 
-            # Truncate to model max len
-            if len(inp) > max_sequence_length:
-                inp = inp[-max_sequence_length:]
-                tgt = tgt[-max_sequence_length:]
+            loss.backward()
 
-            # Pad to fixed length
-            x_np = np.zeros((1, 1, 1, max_sequence_length), dtype=np.uint32)
-            y_np = np.zeros((1, max_sequence_length), dtype=np.uint32)
-            T = len(inp)
-            x_np[0, 0, 0, :T] = np.asarray(inp, dtype=np.uint32)
-            y_np[0, :T] = np.asarray(tgt, dtype=np.uint32)
-
-            # Mask only completion-token positions in the target
-            # completion starts after prompt, but target is shifted by 1
-            prompt_len = len(prompt_ids)
-            completion_start_in_target = max(0, prompt_len - 1)
-
-            loss_scaler_np = np.zeros((1, 1, max_sequence_length, 1), dtype=np.float32)
-            active_end = min(T, completion_start_in_target + len(completion_ids))
-            if active_end > completion_start_in_target:
-                loss_scaler_np[0, 0, completion_start_in_target:active_end, 0] = 1.0
-                active = float(active_end - completion_start_in_target)
-                # normalize so mean() over all tokens becomes mean over active tokens
-                loss_scaler_np *= max_sequence_length / active
-
-            X_tt = ttml.autograd.Tensor.from_numpy(
-                x_np, ttnn.Layout.ROW_MAJOR, ttnn.DataType.UINT32
-            )
-            y_tt = ttml.autograd.Tensor.from_numpy(
-                y_np, ttnn.Layout.ROW_MAJOR, ttnn.DataType.UINT32
-            )
-            scaler_tt = ttml.autograd.Tensor.from_numpy(
-                loss_scaler_np, ttnn.Layout.TILE, ttnn.DataType.BFLOAT16
-            )
-
-            logits = tt_model(X_tt, causal_mask)
-            per_tok_ce = ttml.ops.loss.cross_entropy_loss(
-                logits, y_tt, ttml.ops.ReduceType.NONE
-            )
-            nll = ttml.ops.unary.mean(
-                per_tok_ce * scaler_tt
-            )  # mean NLL over completion tokens
-
-            # GRPO policy loss: -A * logprob == A * NLL
-            sample_loss = ttml.ops.binary.mul(nll, float(adv))
-            sample_loss = ttml.ops.binary.mul(sample_loss, 1.0 / float(valid_count))
-
-            # Backward per sample
-            sample_loss.backward(False)
-            ttml.autograd.AutoContext.get_instance().reset_graph()
-
-            _deallocate_list(
-                [
-                    sample_loss,
-                    nll,
-                    per_tok_ce,
-                    logits,
-                    scaler_tt,
-                    y_tt,
-                    X_tt,
-                ]
-            )
-
-            sample_loss = nll = per_tok_ce = logits = None
-            scaler_tt = y_tt = X_tt = None
+            start += B
 
         optimizer.step()
-
-        print(f"step={step} reward_mean={rewards_np.mean():.4f}")
-
-    _safe_deallocate(causal_mask.get_value())
 
 
 def load_training_config():
