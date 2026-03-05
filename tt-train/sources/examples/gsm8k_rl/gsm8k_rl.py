@@ -294,13 +294,14 @@ def generate_inputs_targets(sequences_np):
 
 def ignore_probs(probs_tt, l_np, r_np, B, T):
     assert l_np.shape == (B,) and r_np.shape == (B,)
+    assert probs_tt.shape == (B, T - 1)
 
     # Build keep-mask on host (fast/simple), then apply with TTML mul
-    j = np.arange(T, dtype=np.int32)[None, :]  # [1, T]
+    j = np.arange(T - 1, dtype=np.int32)[None, :]  # [1, T-1]
     l = l_np.astype(np.int32).reshape(B, 1)  # [B, 1]
     r = r_np.astype(np.int32).reshape(B, 1)  # [B, 1]
 
-    keep_np = ((j >= l) & (j <= r)).astype(np.float32)  # [B, T], 1 inside, 0 outside
+    keep_np = ((j >= l) & (j <= r)).astype(np.float32)  # [B, T-1], 1 inside, 0 outside
 
     keep_tt = ttml.autograd.Tensor.from_numpy(
         keep_np,
@@ -316,26 +317,25 @@ def calculate_loss(
     nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int, B: int, T: int
 ):
     assert nlog_probs_tt.shape() == (B, T - 1)
+    assert advantages_tt.shape() == (B, T - 1)
 
     # completion token counts per row (avoid divide-by-zero)
     comp_lens_np = np.maximum(
         lengths_np.astype(np.float32) - float(prompt_len), 1.0
     )  # [B]
 
-    row_scale_np = (float(T) / comp_lens_np).reshape(B, 1)  # [B,1]
-    row_ = np.repeat(advantages_pass, T - 1, axis=1).astype(np.float32)
+    row_scale_np = (float(T - 1) / comp_lens_np).reshape(B, 1)  # [B,1]
+    row_scale_np = np.repeat(row_scale_np, T - 1, axis=1).astype(np.float32)  # [B, T-1]
 
     row_scale_tt = ttml.autograd.Tensor.from_numpy(
         row_scale_np,
         layout=ttnn.Layout.ROW_MAJOR,
         new_type=ttnn.DataType.BFLOAT16,
-    )
+    )  # [B, T-1]
 
-    adv_scaled_tt = ttml.ops.binary.mul(advantages_tt, row_scale_tt)  # [B,1]
+    adv_scaled_tt = ttml.ops.binary.mul(advantages_tt, row_scale_tt)  # [B,T-1]
 
-    weighted_tt = ttml.ops.binary.mul(
-        nlog_probs_tt, adv_scaled_tt
-    )  # [B,T] via broadcast
+    weighted_tt = ttml.ops.binary.mul(nlog_probs_tt, adv_scaled_tt)  # [B,T-1]
 
     return ttml.ops.unary.mean(weighted_tt)
 
@@ -346,8 +346,8 @@ def train_gsm8k(max_steps: int = 100):
     X, _ = tokenize_dataset(train_data, tokenizer)
     print("Loaded GSM8K dataset!")
 
-    tt_model.train()
     for step in range(min(max_steps, len(X))):
+        print(f"{step=}")
         prompt: Tokens = X[step].tolist()
 
         # -------------------------
@@ -369,21 +369,28 @@ def train_gsm8k(max_steps: int = 100):
         # PHASE 2: differentiable policy update
         # ------------------------------------
 
+        tt_model.train()
         optimizer.zero_grad()
         start = 0
         for pass_size in iter_pass(group_size, 4):
+            print(f"Pass, {start=}, {pass_size=}")
             B = pass_size
 
             # sequences is of shape BxT, length is of shape (B)
             sequences_np, lengths_np = generate_sequences(prompt, completions, start, B)
             T = sequences_np.shape[1]
+
+            # shape of inputs_np, and targets_np is (B, T-1)
             inputs_np, targets_np = generate_inputs_targets(sequences_np)
 
-            nlog_probs = compute_nlog_probs(inputs_np, targets_np)
+            # shape of nlog_probs is (B, T-1)
+            nlog_probs = compute_nlog_probs(inputs_np, targets_np, B, T)
 
             l_np = np.full((B,), len(prompt) - 1, dtype=np.uint32)
             r_np = lengths_np - 2
-            nlog_probs = ignore_probs(nlog_probs, l_np, r_np)
+            nlog_probs = ignore_probs(
+                nlog_probs, l_np, r_np, B, T
+            )  # shape of nlog_probs still (B, T-1)
 
             advantages_pass = advantages_np[start : start + B].reshape((B, 1))
             advantages_pass = np.repeat(advantages_pass, T - 1, axis=1).astype(
@@ -398,7 +405,7 @@ def train_gsm8k(max_steps: int = 100):
             )
 
             loss = calculate_loss(
-                nlog_probs, advantages_pass_tt, lengths_np, len(prompt)
+                nlog_probs, advantages_pass_tt, lengths_np, len(prompt), B, T
             )
 
             loss.backward()
