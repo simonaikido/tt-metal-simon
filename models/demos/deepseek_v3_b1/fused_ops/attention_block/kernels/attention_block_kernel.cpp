@@ -1231,7 +1231,7 @@ void kernel_main() {
         DPRINT
             << "bcast output: "
             << TileSlice(
-                   rmsnorm_input_cb, 0, SliceRange{.h0 = 0, .h1 = 32, .hs = 8, .w0 = 0, .w1 = 32, .ws = 8}, true, true)
+                   rmsnorm_input_cb, 0, SliceRange{.h0 = 0, .h1 = 1, .hs = 1, .w0 = 0, .w1 = 32, .ws = 8}, true, true)
             << ENDL();
         cb_push_back(rmsnorm_input_cb, rmsnorm_num_tiles);
     }
