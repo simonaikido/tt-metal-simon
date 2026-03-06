@@ -238,20 +238,23 @@ def iter_pass(total: int, chunk: int):
 
 
 # Takes np.arrays 'inputs_np', 'targets_np', returns a ttml tensor 'tokens_nlog', where
-# for every i, j \in [0, B-1]x[0, T-1]
+# for every i, j \in [0, B-1]x[0, T-2]
 # tokens_nlog[i,j] = -log(prob(token[i,j])), where
 # token[i,j] = vocab[targets_np[i,j]]
 def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
-    x_np = inputs_np.astype(np.uint32).reshape(B, 1, 1, T)
+    PT = round_to_tile(T - 1)  # padded(T-1)
+
+    x_pad = np.full((B, PT), pad_token, dtype=np.uint32)
+    x_pad[:, : T - 1] = inputs_np.astype(np.uint32)
 
     X_tt = ttml.autograd.Tensor.from_numpy(
-        x_np,
+        x_pad.reshape(B, 1, 1, PT),
         layout=ttnn.Layout.ROW_MAJOR,
         new_type=ttnn.DataType.UINT32,
     )
 
-    mask_tensor = generate_casual_mask(T, 0)  # [1, 1, T, T]
-    logits = tt_model(X_tt, mask_tensor)  # [B, 1, T, V]
+    mask_tensor = generate_casual_mask(T - 1, 0)  # [1, 1, PT, PT]
+    logits = tt_model(X_tt, mask_tensor)  # [B, 1, PT, V]
 
     targets_tt = ttml.autograd.Tensor.from_numpy(
         targets_np,
@@ -263,7 +266,7 @@ def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
         logits, targets_tt, ttml.ops.ReduceType.NONE
     )
 
-    tokens_nlog = ttml.ops.reshape.reshape(tokens_nlog, [B, T])
+    tokens_nlog = ttml.ops.reshape.reshape(tokens_nlog, [B, PT])
 
     return tokens_nlog
 
@@ -378,6 +381,7 @@ def train_gsm8k(max_steps: int = 100):
 
             # sequences is of shape BxT, length is of shape (B)
             sequences_np, lengths_np = generate_sequences(prompt, completions, start, B)
+
             T = sequences_np.shape[1]
 
             # shape of inputs_np, and targets_np is (B, T-1)
@@ -386,11 +390,14 @@ def train_gsm8k(max_steps: int = 100):
             # shape of nlog_probs is (B, T-1)
             nlog_probs = compute_nlog_probs(inputs_np, targets_np, B, T)
 
+            assert nlog_probs.shape() == (B, T - 1)
+            assert False
+
             l_np = np.full((B,), len(prompt) - 1, dtype=np.uint32)
             r_np = lengths_np - 2
             nlog_probs = ignore_probs(
                 nlog_probs, l_np, r_np, B, T
-            )  # shape of nlog_probs still (B, T-1)
+            )  # shape of nlog_probs still (B, P)
 
             advantages_pass = advantages_np[start : start + B].reshape((B, 1))
             advantages_pass = np.repeat(advantages_pass, T - 1, axis=1).astype(
