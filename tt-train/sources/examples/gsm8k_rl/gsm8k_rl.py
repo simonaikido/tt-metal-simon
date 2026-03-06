@@ -27,13 +27,13 @@ from ttml.common.utils import (
 
 tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_ID)
 vocab_size: int = tokenizer.vocab_size
-temperature: float = 0
-max_tokens_to_complete: int = 20
+temperature: float = 0.5
+max_tokens_to_complete: int = 250
 num_layers: int = 30
 num_groups: int = 3
 embedding_dim: int = 576
 num_heads: int = 9
-max_sequence_length: int = 128
+max_sequence_length: int = 768
 seed = 42
 tile_size: int = 32
 group_size: int = 8
@@ -242,19 +242,16 @@ def iter_pass(total: int, chunk: int):
 # tokens_nlog[i,j] = -log(prob(token[i,j])), where
 # token[i,j] = vocab[targets_np[i,j]]
 def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
-    PT = round_to_tile(T - 1)  # padded(T-1)
-
-    x_pad = np.full((B, PT), pad_token, dtype=np.uint32)
-    x_pad[:, : T - 1] = inputs_np.astype(np.uint32)
+    X = inputs_np.astype(np.uint32)
 
     X_tt = ttml.autograd.Tensor.from_numpy(
-        x_pad.reshape(B, 1, 1, PT),
+        X.reshape(B, 1, 1, T - 1),
         layout=ttnn.Layout.ROW_MAJOR,
         new_type=ttnn.DataType.UINT32,
     )
 
-    mask_tensor = generate_casual_mask(T - 1, 0)  # [1, 1, PT, PT]
-    logits = tt_model(X_tt, mask_tensor)  # [B, 1, PT, V]
+    mask_tensor = generate_casual_mask(T - 1, 0)  # [1, 1, T-1, T-1]
+    logits = tt_model(X_tt, mask_tensor)  # [B, 1, T-1, V]
 
     targets_tt = ttml.autograd.Tensor.from_numpy(
         targets_np,
@@ -266,17 +263,16 @@ def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
         logits, targets_tt, ttml.ops.ReduceType.NONE
     )
 
-    tokens_nlog = ttml.ops.reshape.reshape(tokens_nlog, [B, PT])
+    tokens_nlog = ttml.ops.reshape.reshape(tokens_nlog, [B, T - 1])
 
     return tokens_nlog
 
 
 # Generates an array of size (B, T), where T is the longest sequence length
 # Returns the sequence array, an array of lengths of shape (B).
-def generate_sequences(prompt: Tokens, completions: Completions, start, B):
+def generate_sequences(prompt: Tokens, completions: Completions, start, B, T):
     batch_completions = completions[start : start + B]
     sequences = [prompt + c for c in batch_completions]
-    T = max(len(s) for s in sequences)
 
     sequences_np = np.full((B, T), pad_token, dtype=np.int32)
     lengths_np = np.zeros((B,), dtype=np.int32)
@@ -297,7 +293,7 @@ def generate_inputs_targets(sequences_np):
 
 def ignore_probs(probs_tt, l_np, r_np, B, T):
     assert l_np.shape == (B,) and r_np.shape == (B,)
-    assert probs_tt.shape == (B, T - 1)
+    assert probs_tt.shape() == [B, T - 1]
 
     # Build keep-mask on host (fast/simple), then apply with TTML mul
     j = np.arange(T - 1, dtype=np.int32)[None, :]  # [1, T-1]
@@ -319,8 +315,8 @@ def ignore_probs(probs_tt, l_np, r_np, B, T):
 def calculate_loss(
     nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int, B: int, T: int
 ):
-    assert nlog_probs_tt.shape() == (B, T - 1)
-    assert advantages_tt.shape() == (B, T - 1)
+    assert nlog_probs_tt.shape() == [B, T - 1]
+    assert advantages_tt.shape() == [B, T - 1]
 
     # completion token counts per row (avoid divide-by-zero)
     comp_lens_np = np.maximum(
@@ -339,8 +335,22 @@ def calculate_loss(
     adv_scaled_tt = ttml.ops.binary.mul(advantages_tt, row_scale_tt)  # [B,T-1]
 
     weighted_tt = ttml.ops.binary.mul(nlog_probs_tt, adv_scaled_tt)  # [B,T-1]
+    weighted_tt_4d = ttml.ops.reshape.reshape(
+        weighted_tt, [B, 1, T - 1, 1]
+    )  # otherwise loss.backward() doesn't work
 
-    return ttml.ops.unary.mean(weighted_tt)
+    return ttml.ops.unary.mean(weighted_tt_4d)
+
+
+def debug_print_prompt_completion(
+    prompt_tokens: Tokens, completion_tokens: Completion, idx: int | None = None
+):
+    prompt_text = tokenizer.decode(prompt_tokens)
+    completion_text = tokenizer.decode(completion_tokens)
+
+    prefix = f"[{idx}] " if idx is not None else ""
+    print(f"{prefix}prompt_text: {prompt_text!r}")
+    print(f"{prefix}completion_text: {completion_text!r}")
 
 
 def train_gsm8k(max_steps: int = 100):
@@ -351,6 +361,7 @@ def train_gsm8k(max_steps: int = 100):
 
     for step in range(min(max_steps, len(X))):
         print(f"{step=}")
+        start_time = time.perf_counter()
         prompt: Tokens = X[step].tolist()
 
         # -------------------------
@@ -365,8 +376,13 @@ def train_gsm8k(max_steps: int = 100):
             completions.append(c)
             rewards.append(r)
 
+            debug_print_prompt_completion(prompt, c)
+
         rewards_np = np.asarray(rewards, dtype=np.float32)
         advantages_np = rewards_np - rewards_np.mean()
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        print(f"Phase 1 done! Elapsed time: {elapsed_ms:.2f} ms")
 
         # ------------------------------------
         # PHASE 2: differentiable policy update
@@ -377,33 +393,44 @@ def train_gsm8k(max_steps: int = 100):
         start = 0
         for pass_size in iter_pass(group_size, 4):
             print(f"Pass, {start=}, {pass_size=}")
+
             B = pass_size
+            # Requirements for T:
+            # T >= sequence_length for all sequences
+            # (T-1) is divisible by tile_size (limitation of the tt_model call)
+            T = max(len(prompt) + len(c) for c in completions)
+            T = round_to_tile(T - 1) + 1
 
             # sequences is of shape BxT, length is of shape (B)
-            sequences_np, lengths_np = generate_sequences(prompt, completions, start, B)
-
-            T = sequences_np.shape[1]
+            sequences_np, lengths_np = generate_sequences(
+                prompt, completions, start, B, T
+            )
 
             # shape of inputs_np, and targets_np is (B, T-1)
             inputs_np, targets_np = generate_inputs_targets(sequences_np)
 
             # shape of nlog_probs is (B, T-1)
             nlog_probs = compute_nlog_probs(inputs_np, targets_np, B, T)
+            assert nlog_probs.shape() == [B, T - 1]
 
-            assert nlog_probs.shape() == (B, T - 1)
-            assert False
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            print(f"nlog_probs computed! Elapsed time: {elapsed_ms:.2f} ms")
 
             l_np = np.full((B,), len(prompt) - 1, dtype=np.uint32)
             r_np = lengths_np - 2
             nlog_probs = ignore_probs(
                 nlog_probs, l_np, r_np, B, T
-            )  # shape of nlog_probs still (B, P)
+            )  # shape of nlog_probs still (B, T - 1)
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            print(f"ignore_probs done! Elapsed time: {elapsed_ms:.2f} ms")
+
+            assert nlog_probs.shape() == [B, T - 1]
 
             advantages_pass = advantages_np[start : start + B].reshape((B, 1))
             advantages_pass = np.repeat(advantages_pass, T - 1, axis=1).astype(
                 np.float32
             )  # [B,T-1]
-            assert advantages_pass.shape == (B, T - 1)
 
             advantages_pass_tt = ttml.autograd.Tensor.from_numpy(
                 advantages_pass,
@@ -411,13 +438,24 @@ def train_gsm8k(max_steps: int = 100):
                 new_type=ttnn.DataType.BFLOAT16,
             )
 
+            assert advantages_pass_tt.shape() == [B, T - 1]
+
             loss = calculate_loss(
                 nlog_probs, advantages_pass_tt, lengths_np, len(prompt), B, T
             )
 
-            loss.backward()
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            print(f"Loss computed! Elapsed time: {elapsed_ms:.2f} ms")
+            loss_np = loss.to_numpy(ttnn.DataType.FLOAT32)
+            loss_val = float(loss_np.reshape(-1)[0])  # loss is [1,1,1,1]
+            print(f"loss={loss_val:.6f}")
+
+            loss.backward(retain_graph=False)
 
             start += B
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            print(f"Pass done! Elapsed time: {elapsed_ms:.2f} ms")
 
         optimizer.step()
 
@@ -485,12 +523,13 @@ if __name__ == "__main__":
     tt_model = create_model(training_config)
     print(tt_model.__dir__())
 
-    prompt = "The capital of France is"
+    prompt = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
     input_tokens = tokenizer.encode(prompt)
 
     completed_tokens = complete_tokens(input_tokens)
+    print(f"{len(completed_tokens)=}")
     print("Prompt + Generated = ")
     print(tokenizer.decode(input_tokens + completed_tokens))
 
     optimizer = create_optimizer(tt_model, training_config)
-    train_gsm8k(max_steps=100)
+    # train_gsm8k(max_steps=100)
