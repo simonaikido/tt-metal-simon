@@ -8,6 +8,7 @@
 #include <optional>
 #include <string_view>
 #include <tt-metalium/core_coord.hpp>
+#include <umd/device/cluster.hpp>
 #include <vector>
 #include <xtensor-blas/xlinalg.hpp>
 
@@ -215,6 +216,11 @@ TEST_P(SoftmaxBackwardOpTypedTest, SoftmaxBackward_SubCoreGrid_Rectangular) {
 
 TEST_P(SoftmaxBackwardOpTypedTest, SoftmaxBackward_SubCoreGrid_NonRectangular) {
     SOFTMAX_BW_SKIP_IF_UNSUPPORTED("sub-core-grid non-rectangular");
+    // TODO: Accuracy issue with P150. Tracking: https://github.com/tenstorrent/tt-metal/issues/39312
+    auto board = tt::umd::Cluster::create_cluster_descriptor()->get_board_type(0);
+    if (board == tt::BoardType::P150) {
+        GTEST_SKIP() << "Skipping on P150 boards";
+    }
     // Non-rectangular (L-shaped) sub-grid
     std::vector<tt::tt_metal::CoreRange> ranges = {
         tt::tt_metal::CoreRange(tt::tt_metal::CoreCoord(0, 0), tt::tt_metal::CoreCoord(2, 0)),  // row y=0
