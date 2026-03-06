@@ -120,6 +120,11 @@ on:
         type: string
         default: ""
         description: "Pre-built ManyLinux Docker image tag"
+      harbor-prefix:
+        required: false
+        type: string
+        default: ""
+        description: "Harbor prefix to use (empty for direct GHCR)"
     outputs:
       ci-build-docker-image:
         description: >-
@@ -216,6 +221,11 @@ on:
         type: boolean
         default: false
         description: "Enable Link Time Optimization (LTO)"
+      harbor-prefix:
+        required: false
+        type: string
+        default: ""
+        description: "Harbor prefix to use (empty for direct GHCR)"
 
 jobs:
   # =============================================================================
@@ -343,7 +353,7 @@ jobs:
       TOOLCHAIN: ${{ inputs.toolchain || needs.parse-platform.outputs.toolchain }}
     container:
       image: >-
-        harbor.ci.tenstorrent.net/${{
+        ${{ inputs.harbor-prefix }}${{
           inputs.ci-build-docker-image ||
           needs.build-docker-image.outputs.ci-build-tag ||
           'docker-image-unresolved!' }}
@@ -620,6 +630,7 @@ jobs:
         ${{ inputs.manylinux-docker-image ||
             needs.build-docker-image.outputs.manylinux-tag ||
             'docker-image-unresolved!' }}
+      harbor-prefix: ${{ inputs.harbor-prefix }}
       ref: ${{ inputs.ref || '' }}
       tracy: ${{ inputs.tracy }}
       enable-lto: ${{ inputs.enable-lto || false }}
