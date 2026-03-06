@@ -1169,7 +1169,7 @@ def test_attention_block(
             tp_start = tp_group * slice_size
             tp_end = tp_start + slice_size
             expected = golden_mla_output[tp_start:tp_end, :]
-            breakpoint()
+            print(expected[:8, :32:8])
 
             if received.shape != expected.shape:
                 logger.error(
@@ -1181,6 +1181,7 @@ def test_attention_block(
             passing, pcc = comp_pcc(expected, received, 0.84)
             logger.info(f"Device {device_idx} (TP={tp_group}, SP={sp_group}) PreSDPA Output PCC: {pcc}")
             # assert passing, f"Device {device_idx} (TP={tp_group}, SP={sp_group}) PreSDPA Output PCC check failed: {pcc}"
+    breakpoint()
 
     logger.info("✓ Attention Block mesh test passed!")
 

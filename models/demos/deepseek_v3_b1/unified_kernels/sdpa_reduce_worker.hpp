@@ -195,6 +195,9 @@ struct SdpaChunkSender {
         cb_wait_front(cfg.cb_ms, 1);
         send_ms();
         cb_wait_front(cfg.cb_l, num_l_chunks * tiles_per_l_chunk);
+        DPRINT << "Local mla: "
+               << TileSlice(cfg.cb_l, 0, SliceRange{.h0 = 0, .h1 = 8, .hs = 1, .w0 = 0, .w1 = 32, .ws = 8}, true, true)
+               << ENDL();
         for (uint32_t i = 0; i < num_l_chunks; i++) {
             send_l_chunk(i);
         }
