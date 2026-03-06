@@ -28,7 +28,7 @@ from ttml.common.utils import (
 tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_ID)
 vocab_size: int = tokenizer.vocab_size
 temperature: float = 0.5
-max_tokens_to_complete: int = 250
+max_tokens_to_complete: int = 100
 num_layers: int = 30
 num_groups: int = 3
 embedding_dim: int = 576
@@ -36,7 +36,7 @@ num_heads: int = 9
 max_sequence_length: int = 768
 seed = 42
 tile_size: int = 32
-group_size: int = 8
+group_size: int = 4
 optimizer = None
 
 Token: TypeAlias = int
@@ -50,30 +50,48 @@ if pad_token is None:
     pad_token = tokenizer.eos_token_id
 
 
+def round_to_tile(x: int) -> int:
+    return ((x + tile_size - 1) // tile_size) * tile_size
+
+
+def iter_pass(total: int, chunk: int):
+    full, rem = divmod(total, chunk)
+    for _ in range(full):
+        yield chunk
+    if rem:
+        yield rem
+
+
+def debug_print_prompt_completion(
+    prompt_tokens: Tokens, completion_tokens: Completion, idx: int | None = None
+):
+    prompt_text = tokenizer.decode(prompt_tokens)
+    completion_text = tokenizer.decode(completion_tokens)
+
+    prefix = f"[{idx}] " if idx is not None else ""
+    print(f"{prefix}prompt_text: {prompt_text!r}")
+    print(f"{prefix}completion_text: {completion_text!r}")
+
+
 def get_device():
     ctx = ttml.autograd.AutoContext.get_instance()
     return ctx.get_device()
 
 
-def _safe_deallocate(ttnn_tensor):
-    if ttnn_tensor is None:
-        return
-    try:
-        ttnn_tensor.deallocate(True)
-    except Exception:
-        pass
+def tokenize_dataset(data, tokenizer: AutoTokenizer):
+    """
+    Tokenizes the questions and answers in the dataset using the provided tokenizer.
 
+    data: dataset with "question" and "answer" fields
+    tokenizer: HuggingFace tokenizer
+    """
+    X = [sample["question"] for sample in data]
+    y = [sample["answer"] for sample in data]
 
-def _deallocate_list(ttml_tensors):
-    for x in ttml_tensors:
-        if x is None:
-            continue
-
-        _safe_deallocate(x.get_value())
-
-
-def round_to_tile(x: int) -> int:
-    return ((x + tile_size - 1) // tile_size) * tile_size
+    tok = lambda texts: tokenizer(texts, return_tensors="np", add_special_tokens=False)[
+        "input_ids"
+    ]
+    return tok(X), tok(y)
 
 
 def tokens_to_model_tensor(tokens: List[int]):
@@ -92,13 +110,14 @@ def tokens_to_model_tensor(tokens: List[int]):
     return t
 
 
-# TODO: update the description of this function
-# Generates [1, 1, len, len] lower-triangular tensor
-# with everything below a diagonal set to 1.
-# The diagonal and everything above it is 0.
-# It is a ttml::Tensor
-# grads are not tracked in the casual mask
-def generate_casual_mask(query_len: int, processed_tokens: int):
+# Builds the causal attention mask for decode.
+# - Prefill mode (processed_tokens == 0): returns a padded lower-triangular mask
+#   of shape [1, 1, padded_n, padded_n] so token i can attend only to <= i.
+# - Incremental mode (processed_tokens > 0, query_len == 1): returns one query row
+#   of shape [1, 1, tile_size, padded_n], where only the first row is active and
+#   can attend to all tokens seen so far (0..processed_tokens).
+# Shapes are tile-padded to satisfy TT kernel layout requirements.
+def generate_causal_mask(query_len: int, processed_tokens: int):
     assert (query_len > 0 and processed_tokens == 0) or (
         query_len == 1 and processed_tokens > 0
     )
@@ -110,11 +129,14 @@ def generate_casual_mask(query_len: int, processed_tokens: int):
         m = np.zeros((padded_n, padded_n), dtype=np.uint32)
         m[:n, :n] = np.tril(np.ones((n, n), dtype=np.uint32))
 
-        return ttml.autograd.Tensor.from_numpy(
+        result = ttml.autograd.Tensor.from_numpy(
             m.reshape(1, 1, padded_n, padded_n),
             layout=ttnn.Layout.ROW_MAJOR,
             new_type=ttnn.DataType.BFLOAT16,
         )
+
+        assert result.shape() == [1, 1, padded_n, padded_n]
+        return result
     else:
         n = processed_tokens + 1
         padded_n = round_to_tile(n)
@@ -122,27 +144,14 @@ def generate_casual_mask(query_len: int, processed_tokens: int):
         m = np.zeros((tile_size, padded_n), dtype=np.uint32)
         m[0, :n] = 1
 
-        return ttml.autograd.Tensor.from_numpy(
+        result = ttml.autograd.Tensor.from_numpy(
             m.reshape(1, 1, tile_size, padded_n),
             layout=ttnn.Layout.ROW_MAJOR,
             new_type=ttnn.DataType.BFLOAT16,
         )
 
-
-# Returns a token from raw logits
-def sample_token(logits):
-    n, m, k, V = logits.shape()
-    assert n == 1 and m == 1 and k == 1
-
-    if temperature < 0.01:
-        argmax_result = ttnn.argmax(logits.get_value(), dim=3, keepdim=True)
-        next_token = int(argmax_result.item())
-        next_token = min(next_token, vocab_size - 1)
-    else:
-        sampled = ttml.ops.sample.sample_op(logits, temperature, seed, None)
-        next_token = int(sampled.get_value().item())
-
-    return next_token
+        assert result.shape() == [1, 1, tile_size, padded_n]
+        return result
 
 
 class DecodeState:
@@ -173,7 +182,7 @@ def complete_token(state: DecodeState) -> int:
 
     padded_step_len = round_to_tile(step_tokens_len)
     input_tensor = tokens_to_model_tensor(step_tokens)
-    mask_tensor = generate_casual_mask(step_tokens_len, processed_tokens)
+    mask_tensor = generate_causal_mask(step_tokens_len, processed_tokens)
 
     logits = tt_model(
         input_tensor, mask_tensor, kv_cache=state.kv_cache, new_tokens=len(step_tokens)
@@ -195,6 +204,22 @@ def complete_token(state: DecodeState) -> int:
     return next_token
 
 
+# Returns a token from raw logits
+def sample_token(logits):
+    n, m, k, V = logits.shape()
+    assert n == 1 and m == 1 and k == 1
+
+    if temperature < 0.01:
+        argmax_result = ttnn.argmax(logits.get_value(), dim=3, keepdim=True)
+        next_token = int(argmax_result.item())
+        next_token = min(next_token, vocab_size - 1)
+    else:
+        sampled = ttml.ops.sample.sample_op(logits, temperature, seed, None)
+        next_token = int(sampled.get_value().item())
+
+    return next_token
+
+
 def complete_tokens(input_tokens: List[int]) -> Completion:
     state = DecodeState(input_tokens)
 
@@ -208,40 +233,14 @@ def complete_tokens(input_tokens: List[int]) -> Completion:
         return state.tokens[len(input_tokens) :]
 
 
-def tokenize_dataset(data, tokenizer: AutoTokenizer):
-    """
-    Tokenizes the questions and answers in the dataset using the provided tokenizer.
-
-    data: dataset with "question" and "answer" fields
-    tokenizer: HuggingFace tokenizer
-    """
-    X = [sample["question"] for sample in data]
-    y = [sample["answer"] for sample in data]
-
-    tok = lambda texts: tokenizer(texts, return_tensors="np", add_special_tokens=False)[
-        "input_ids"
-    ]
-    return tok(X), tok(y)
-
-
-def get_reward(c: Completion) -> Reward:
-    # Example reward: shorter completion is better
-    return -float(len(c))
-
-
-def iter_pass(total: int, chunk: int):
-    full, rem = divmod(total, chunk)
-    for _ in range(full):
-        yield chunk
-    if rem:
-        yield rem
-
-
 # Takes np.arrays 'inputs_np', 'targets_np', returns a ttml tensor 'tokens_nlog', where
 # for every i, j \in [0, B-1]x[0, T-2]
 # tokens_nlog[i,j] = -log(prob(token[i,j])), where
 # token[i,j] = vocab[targets_np[i,j]]
 def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
+    assert inputs_np.shape == (B, T - 1)
+    assert targets_np.shape == (B, T - 1)
+
     X = inputs_np.astype(np.uint32)
 
     X_tt = ttml.autograd.Tensor.from_numpy(
@@ -250,7 +249,7 @@ def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
         new_type=ttnn.DataType.UINT32,
     )
 
-    mask_tensor = generate_casual_mask(T - 1, 0)  # [1, 1, T-1, T-1]
+    mask_tensor = generate_causal_mask(T - 1, 0)  # [1, 1, T-1, T-1]
     logits = tt_model(X_tt, mask_tensor)  # [B, 1, T-1, V]
 
     targets_tt = ttml.autograd.Tensor.from_numpy(
@@ -265,11 +264,10 @@ def compute_nlog_probs(inputs_np, targets_np, B, T) -> Any:
 
     tokens_nlog = ttml.ops.reshape.reshape(tokens_nlog, [B, T - 1])
 
+    assert tokens_nlog.shape() == [B, T - 1]
     return tokens_nlog
 
 
-# Generates an array of size (B, T), where T is the longest sequence length
-# Returns the sequence array, an array of lengths of shape (B).
 def generate_sequences(prompt: Tokens, completions: Completions, start, B, T):
     batch_completions = completions[start : start + B]
     sequences = [prompt + c for c in batch_completions]
@@ -281,9 +279,13 @@ def generate_sequences(prompt: Tokens, completions: Completions, start, B, T):
         sequences_np[i, : len(seq)] = np.asarray(seq, dtype=np.int32)
         lengths_np[i] = len(seq)
 
+    assert sequences_np.shape == (B, T)
+    assert lengths_np.shape == (B,)
     return sequences_np, lengths_np
 
 
+# Prefix of inputs = <<state>>
+# Target = <<action>>
 def generate_inputs_targets(sequences_np):
     inputs_np = sequences_np[:, :-1]
     targets_np = sequences_np[:, 1:]
@@ -291,6 +293,10 @@ def generate_inputs_targets(sequences_np):
     return inputs_np, targets_np
 
 
+# Takes a ttml tensor probs_tt of shape [B, T-1].
+# For every i in [0, B-1], and j in [0, T-1], such that j < l_np[i] or j > r_np[i],
+# set 0 on probabilities probs_tt[i][j].
+# Doesn't modify the probs_tt itself, returns a new tensor.
 def ignore_probs(probs_tt, l_np, r_np, B, T):
     assert l_np.shape == (B,) and r_np.shape == (B,)
     assert probs_tt.shape() == [B, T - 1]
@@ -309,14 +315,34 @@ def ignore_probs(probs_tt, l_np, r_np, B, T):
     )
 
     # zero-out outside [l, r] per row
-    return ttml.ops.binary.mul(probs_tt, keep_tt)
+    result = ttml.ops.binary.mul(probs_tt, keep_tt)
+    assert result.shape() == [B, T - 1]
+
+    return result
+
+
+# Loss formula:
+# L = (1/B) * sum[i=1 to B] (A_i * 1/C_i * sum[j=1 to T-1] nlog_probs[i][j]),
+# where A_i = advantages_tt[i]
+# C_i = max(1, lengths_np[i] - prompt_len)
+# C_i prevents over-scaling gradients for longer completions.
+#
+# Multiplying and dividing by T-1
+# L = 1/[B(T-1)] * sum[i=1 to B] (A_i * [T-1]/C_i * sum[j=1 to T-1] nlog_probs[i][j])
+# comp_lens_np[i] = C_i
+# row_scale_np[i] = (T-1)/C_i
+#
+# L = 1/[B(T-1)](sum[i=1 to B] (A_i * row_scale_np[i] * sum[j=1 to T-1] nlog_probs[i][j]))
+# L = 1/[B(T-1)](sum[i=1 to B] sum[j=1 to T-1] (A_i * row_scale_np[i] * nlog_probs[i][j]))
+# L = mean[i,j] (A_i * row_scale_np[i] * nlog_probs[i][j])
+# L = mean[i,j] (advantages_scaled[i] * nlog_probs[i][j])
 
 
 def calculate_loss(
-    nlog_probs_tt, advantages_tt, lengths_np, prompt_len: int, B: int, T: int
+    nlog_probs_tt, advantages_np, lengths_np, prompt_len: int, B: int, T: int
 ):
     assert nlog_probs_tt.shape() == [B, T - 1]
-    assert advantages_tt.shape() == [B, T - 1]
+    assert advantages_np.shape == (B,)
 
     # completion token counts per row (avoid divide-by-zero)
     comp_lens_np = np.maximum(
@@ -324,33 +350,44 @@ def calculate_loss(
     )  # [B]
 
     row_scale_np = (float(T - 1) / comp_lens_np).reshape(B, 1)  # [B,1]
-    row_scale_np = np.repeat(row_scale_np, T - 1, axis=1).astype(np.float32)  # [B, T-1]
+    row_scale_2d_np = np.repeat(row_scale_np, T - 1, axis=1).astype(
+        np.float32
+    )  # [B, T-1]
 
-    row_scale_tt = ttml.autograd.Tensor.from_numpy(
-        row_scale_np,
+    row_scale_2d_tt = ttml.autograd.Tensor.from_numpy(
+        row_scale_2d_np,
         layout=ttnn.Layout.ROW_MAJOR,
         new_type=ttnn.DataType.BFLOAT16,
     )  # [B, T-1]
 
-    adv_scaled_tt = ttml.ops.binary.mul(advantages_tt, row_scale_tt)  # [B,T-1]
+    advantages_np_reshaped = advantages_np.reshape(B, 1)  # [B,1]
+    advantages_2d_np = np.repeat(advantages_np_reshaped, T - 1, axis=1).astype(
+        np.float32
+    )  # [B, T-1]
 
-    weighted_tt = ttml.ops.binary.mul(nlog_probs_tt, adv_scaled_tt)  # [B,T-1]
+    advantages_2d_tt = ttml.autograd.Tensor.from_numpy(
+        advantages_2d_np,
+        layout=ttnn.Layout.ROW_MAJOR,
+        new_type=ttnn.DataType.BFLOAT16,
+    )  # [B, T-1]
+
+    advantages_scaled_2d_tt = ttml.ops.binary.mul(
+        advantages_2d_tt, row_scale_2d_tt
+    )  # [B, T-1]
+    weighted_tt = ttml.ops.binary.mul(nlog_probs_tt, advantages_scaled_2d_tt)  # [B,T-1]
     weighted_tt_4d = ttml.ops.reshape.reshape(
         weighted_tt, [B, 1, T - 1, 1]
     )  # otherwise loss.backward() doesn't work
 
-    return ttml.ops.unary.mean(weighted_tt_4d)
+    result = ttml.ops.unary.mean(weighted_tt_4d)
+    assert result.shape() == [1, 1, 1, 1]
+
+    return result
 
 
-def debug_print_prompt_completion(
-    prompt_tokens: Tokens, completion_tokens: Completion, idx: int | None = None
-):
-    prompt_text = tokenizer.decode(prompt_tokens)
-    completion_text = tokenizer.decode(completion_tokens)
-
-    prefix = f"[{idx}] " if idx is not None else ""
-    print(f"{prefix}prompt_text: {prompt_text!r}")
-    print(f"{prefix}completion_text: {completion_text!r}")
+def get_reward(c: Completion) -> Reward:
+    # Example reward: shorter completion is better
+    return -float(len(c)) + float(np.random.rand())
 
 
 def train_gsm8k(max_steps: int = 100):
@@ -395,13 +432,16 @@ def train_gsm8k(max_steps: int = 100):
             print(f"Pass, {start=}, {pass_size=}")
 
             B = pass_size
+
+            ## 1. Computing probabilities for all tokens in the pass sequences together.
+
             # Requirements for T:
             # T >= sequence_length for all sequences
             # (T-1) is divisible by tile_size (limitation of the tt_model call)
             T = max(len(prompt) + len(c) for c in completions)
             T = round_to_tile(T - 1) + 1
 
-            # sequences is of shape BxT, length is of shape (B)
+            # sequences is of shape BxT, length is of shape (B,)
             sequences_np, lengths_np = generate_sequences(
                 prompt, completions, start, B, T
             )
@@ -411,10 +451,11 @@ def train_gsm8k(max_steps: int = 100):
 
             # shape of nlog_probs is (B, T-1)
             nlog_probs = compute_nlog_probs(inputs_np, targets_np, B, T)
-            assert nlog_probs.shape() == [B, T - 1]
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             print(f"nlog_probs computed! Elapsed time: {elapsed_ms:.2f} ms")
+
+            ## 2. Ignoring padded tokens and tokens from the prompt
 
             l_np = np.full((B,), len(prompt) - 1, dtype=np.uint32)
             r_np = lengths_np - 2
@@ -425,23 +466,10 @@ def train_gsm8k(max_steps: int = 100):
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             print(f"ignore_probs done! Elapsed time: {elapsed_ms:.2f} ms")
 
-            assert nlog_probs.shape() == [B, T - 1]
-
-            advantages_pass = advantages_np[start : start + B].reshape((B, 1))
-            advantages_pass = np.repeat(advantages_pass, T - 1, axis=1).astype(
-                np.float32
-            )  # [B,T-1]
-
-            advantages_pass_tt = ttml.autograd.Tensor.from_numpy(
-                advantages_pass,
-                layout=ttnn.Layout.ROW_MAJOR,
-                new_type=ttnn.DataType.BFLOAT16,
-            )
-
-            assert advantages_pass_tt.shape() == [B, T - 1]
-
+            ## 3. Calculate the loss for all sequences in the pass
+            advantages_pass = advantages_np[start : start + B]
             loss = calculate_loss(
-                nlog_probs, advantages_pass_tt, lengths_np, len(prompt), B, T
+                nlog_probs, advantages_pass, lengths_np, len(prompt), B, T
             )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -450,6 +478,7 @@ def train_gsm8k(max_steps: int = 100):
             loss_val = float(loss_np.reshape(-1)[0])  # loss is [1,1,1,1]
             print(f"loss={loss_val:.6f}")
 
+            ## 4. Backward pass. Gradients accumulate over passes
             loss.backward(retain_graph=False)
 
             start += B
@@ -460,32 +489,13 @@ def train_gsm8k(max_steps: int = 100):
         optimizer.step()
 
 
-def load_training_config():
+def load_model_config():
     yaml_config = load_config(
         CONFIG, f"{get_tt_metal_home()}/tt-train/configs/training_configs"
     )
 
     print(f"YAML config: {yaml_config}")
     model_config = load_config(yaml_config["training_config"]["model_config"])
-
-    override_config_path = (
-        f"{os.environ['TT_METAL_HOME']}/tt-train/configs/training_overrides.yaml"
-    )
-
-    if os.path.isfile(override_config_path):
-        print("Applying training overrides...")
-
-        override_config = load_config(override_config_path)
-
-        yaml_config = yaml_deep_update(yaml_config, override_config)
-        model_config = yaml_deep_update(model_config, override_config)
-
-        # pretty output of yaml config
-        import yaml
-
-        print("Loaded YAML config:")
-        print(yaml.dump(yaml_config, sort_keys=False, default_flow_style=False))
-        print("*********************************\n\n")
 
     return model_config
 
@@ -513,16 +523,7 @@ def create_model(model_config):
     return tt_model
 
 
-if __name__ == "__main__":
-    set_seed(42)
-    training_config = load_training_config()
-    print(training_config)
-
-    initialize_device(training_config)
-
-    tt_model = create_model(training_config)
-    print(tt_model.__dir__())
-
+def inference_example():
     prompt = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
     input_tokens = tokenizer.encode(prompt)
 
@@ -531,5 +532,17 @@ if __name__ == "__main__":
     print("Prompt + Generated = ")
     print(tokenizer.decode(input_tokens + completed_tokens))
 
-    optimizer = create_optimizer(tt_model, training_config)
-    # train_gsm8k(max_steps=100)
+
+if __name__ == "__main__":
+    set_seed(42)
+    model_config = load_model_config()
+    print(model_config)
+
+    initialize_device(model_config)
+
+    tt_model = create_model(model_config)
+
+    # inference_example()
+
+    optimizer = create_optimizer(tt_model, model_config)
+    train_gsm8k(max_steps=100)
