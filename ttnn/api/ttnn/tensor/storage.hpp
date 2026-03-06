@@ -38,10 +38,13 @@ private:
 
 struct DeviceStorage {
     std::vector<distributed::MeshCoordinate> coords;
+
+private:
     std::shared_ptr<distributed::MeshBuffer> mesh_buffer;
     // Workaround for managing view MeshBuffer; expected to be refactored in #38093
     std::shared_ptr<distributed::MeshBuffer> root_mesh_buffer;
 
+public:
     DeviceStorage() = default;
     DeviceStorage(
         std::shared_ptr<distributed::MeshBuffer> mesh_buffer_,
@@ -49,7 +52,8 @@ struct DeviceStorage {
         std::shared_ptr<distributed::MeshBuffer> root_buffer_ = nullptr);
 
     Buffer* get_buffer() const;
-    std::shared_ptr<distributed::MeshBuffer> get_mesh_buffer() const;
+    const distributed::MeshBuffer& get_mesh_buffer() const;
+    std::shared_ptr<distributed::MeshBuffer> get_mesh_buffer_leak_ownership() const;
 
     // Begin internal functions:
     //
@@ -70,6 +74,15 @@ struct DeviceStorage {
 
     // Returns true if the tensor spans across all devices in a mesh.
     bool is_uniform_storage() const;
+
+    // These are internal functions and should be treated as a public API.
+    // They are here to support distributed API.
+    DeviceStorage reduce_to_single_device_storage(const distributed::MeshCoordinate& coord) const;
+    static DeviceStorage combine_to_multi_device_storage(
+        std::span<std::reference_wrapper<const DeviceStorage>> storages);
+
+    // Low level function, strickly internal:
+    DeviceStorage with_coords(std::vector<distributed::MeshCoordinate> new_coords) const;
 };
 
 using Storage = std::variant<HostStorage, DeviceStorage>;
