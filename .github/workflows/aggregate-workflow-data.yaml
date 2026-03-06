@@ -16,6 +16,15 @@ on:
         required: false
         type: boolean
         default: false
+      run-auto-triage:
+        description: 'Run auto-triage for regressed jobs'
+        required: false
+        type: boolean
+        default: true
+      slack-channel-id:
+        description: 'Slack channel ID to post notifications to'
+        required: false
+        type: string
 
 jobs:
   fetch-data:
@@ -268,7 +277,7 @@ jobs:
         id: slack-report
         uses: ./.github/actions/slack-report-analyze-workflow-data
         with:
-          channel_id: ${{ secrets.SLACK_METAL_INFRA_CHANNEL_ID }}
+          channel_id: ${{ github.event.inputs.slack-channel-id || secrets.SLACK_METAL_INFRA_CHANNEL_ID }}
           regressed_workflows: ${{ needs.analyze-data.outputs.regressed_workflows }}
           alert_all_message: ${{ needs.analyze-data.outputs.alert_all_message }}
         env:
@@ -276,7 +285,7 @@ jobs:
 
   trigger-auto-triage:
     needs: [analyze-data, handle-failures]
-    if: ${{ always() && needs.analyze-data.result == 'success' && fromJson(needs.analyze-data.outputs.regressed_workflows) != '[]' }}
+    if: ${{ always() && fromJson(github.event.inputs.run-auto-triage || 'true') && needs.analyze-data.result == 'success' && fromJson(needs.analyze-data.outputs.regressed_workflows) != '[]' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -295,6 +304,6 @@ jobs:
           regressed_workflows: ${{ needs.analyze-data.outputs.regressed_workflows }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           slack_ts: ${{ needs.handle-failures.outputs.slack_ts }}
-          slack_channel_id: ${{ secrets.SLACK_METAL_INFRA_CHANNEL_ID }}
+          slack_channel_id: ${{ github.event.inputs.slack-channel-id || secrets.SLACK_METAL_INFRA_CHANNEL_ID }}
           slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
           send-slack-message: true
