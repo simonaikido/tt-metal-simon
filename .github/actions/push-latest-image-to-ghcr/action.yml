@@ -21,10 +21,12 @@ runs:
   steps:
     - name: Validate docker image tag format
       shell: bash
+      env:
+        DOCKER_IMAGE_TAG: ${{ inputs.docker-image-tag }}
       run: |
-        if [[ ! "${{ inputs.docker-image-tag }}" =~ ^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$ ]]; then
+        if [[ ! "$DOCKER_IMAGE_TAG" =~ ^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$ ]]; then
           echo "Error: docker-image-tag must be in format REPO_NAME:VERSION"
-          echo "Provided: ${{ inputs.docker-image-tag }}"
+          echo "Provided: $DOCKER_IMAGE_TAG"
           exit 1
         fi
         echo "✅ Docker image tag format is valid"
@@ -45,15 +47,20 @@ runs:
     - name: Parse repository name
       id: parse-repo
       shell: bash
+      env:
+        DOCKER_IMAGE_TAG: ${{ inputs.docker-image-tag }}
       run: |
-        FULL_TAG="${{ inputs.docker-image-tag }}"
+        FULL_TAG="$DOCKER_IMAGE_TAG"
         REPO_NAME="${FULL_TAG%:*}"
         echo "repo-name=${REPO_NAME}" >> $GITHUB_OUTPUT
         echo "Extracted repository name: ${REPO_NAME}"
 
     - name: Pull, tag and push image
       shell: bash
+      env:
+        REPO_NAME: ${{ steps.parse-repo.outputs.repo-name }}
+        DOCKER_IMAGE_TAG: ${{ inputs.docker-image-tag }}
       run: |
-        LATEST_TAG="${{ steps.parse-repo.outputs.repo-name }}:latest"
-        echo "Copying ${{ inputs.docker-image-tag }} to ${LATEST_TAG}"
-        regctl image copy ${{ inputs.docker-image-tag }} ${LATEST_TAG}
+        LATEST_TAG="${REPO_NAME}:latest"
+        echo "Copying $DOCKER_IMAGE_TAG to ${LATEST_TAG}"
+        regctl image copy $DOCKER_IMAGE_TAG ${LATEST_TAG}
