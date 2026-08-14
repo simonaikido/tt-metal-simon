@@ -107,7 +107,7 @@ jobs:
           name: gh_pages_${{ inputs.version }}
           path: gh_pages/${{ inputs.version }}
       - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+        uses: JamesIves/github-pages-deploy-action@fa24774553152dd7873cd16ebd8d959b010c5445 # v4.9.0
         id: deployment
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -121,7 +121,7 @@ jobs:
         # See more:
         # https://github.com/tenstorrent/tt-metal/issues/17623
         if: ${{ failure() }}
-        uses: geekyeggo/delete-artifact@v5
+        uses: geekyeggo/delete-artifact@f275313e70c08f6120db482d7a6b98377786765b # v5
         continue-on-error: true
         with:
             name: github-pages
