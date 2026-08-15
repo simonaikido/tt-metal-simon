@@ -36,7 +36,7 @@ jobs:
         with:
           fetch-depth: ${{ inputs.fetch_depth }}
           fetch-tags: true
-      - uses: paulhatch/semantic-version@v5.4.0
+      - uses: paulhatch/semantic-version@a8f8f59fd7f0625188492e945240f12d7ad2dca3 # v5.4.0
         id: get-next-semantic-base-version
         with:
           tag_prefix: "v"

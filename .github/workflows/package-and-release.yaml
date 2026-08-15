@@ -146,7 +146,7 @@ jobs:
 
       - name: Publish to PyPI (Trusted Publishing)
         if: ${{ !inputs.dry-run }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
 
 
@@ -157,7 +157,7 @@ jobs:
     steps:
       - name: Create changelog
         id: create-changelog
-        uses: mikepenz/release-changelog-builder-action@v4
+        uses: mikepenz/release-changelog-builder-action@32e3c96f29a6532607f638797455e9e98cfc703d # v4.2.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ignorePreReleases: true
@@ -345,7 +345,7 @@ jobs:
       - name: Trigger RC release workflow
         #This is only run if there are new commits on stable
         if: ${{ steps.check-new-commits.outputs.has-new-commits == 'true' }}
-        uses: benc-uk/workflow-dispatch@v1
+        uses: benc-uk/workflow-dispatch@31e2b3319479a63f0ab15bf800eff9e913504e26 # v1.3.2
         with:
           workflow: package-and-release.yaml
           token: ${{ secrets.GITHUB_TOKEN }}
