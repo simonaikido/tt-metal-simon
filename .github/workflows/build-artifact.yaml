@@ -207,14 +207,22 @@ jobs:
 
       - name: Set artifact name
         id: set-artifact-name
+        env:
+          INPUT_TOOLCHAIN: ${{ inputs.toolchain }}
+          INPUT_REF: ${{ inputs.ref || github.sha }}
+          INPUT_DISTRO: ${{ inputs.distro }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_ARCHITECTURE: ${{ inputs.architecture }}
+          INPUT_BUILD_TYPE: ${{ inputs.build-type }}
+          INPUT_TRACY_SUFFIX: ${{ (inputs.tracy && '-profiler') || '' }}
+          INPUT_DISTRIBUTED_SUFFIX: ${{ (inputs.distributed == false && '-no-distributed') || '' }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          TOOLCHAIN="${{ inputs.toolchain }}"
-          TOOLCHAIN_CLEANED=$(echo "$TOOLCHAIN" | sed -E 's/^cmake\///; s/-toolchain\.cmake$//')
+          TOOLCHAIN_CLEANED=$(echo "$INPUT_TOOLCHAIN" | sed -E 's/^cmake\///; s/-toolchain\.cmake$//')
           # Use full sanitized ref/SHA and workflow run ID to ensure uniqueness across parallel builds
           # Sanitize ref/SHA by replacing invalid characters with hyphens
-          RAW_REF="${{ inputs.ref || github.sha }}"
-          SANITIZED_REF=$(echo "$RAW_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
-          ARTIFACT_NAME="packages-${{ inputs.distro }}-${{ inputs.version }}-${{ inputs.architecture }}-${{ inputs.build-type }}-${TOOLCHAIN_CLEANED}${{ (inputs.tracy && '-profiler') || '' }}${{ (inputs.distributed == false && '-no-distributed') || '' }}-${SANITIZED_REF}-${{ github.run_id }}"
+          SANITIZED_REF=$(echo "$INPUT_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
+          ARTIFACT_NAME="packages-${INPUT_DISTRO}-${INPUT_VERSION}-${INPUT_ARCHITECTURE}-${INPUT_BUILD_TYPE}-${TOOLCHAIN_CLEANED}${INPUT_TRACY_SUFFIX}${INPUT_DISTRIBUTED_SUFFIX}-${SANITIZED_REF}-${GITHUB_RUN_ID}"
 
           echo "name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
           echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
@@ -239,24 +247,32 @@ jobs:
           ccache -z
 
       - name: 🔧 CMake configure
+        env:
+          INPUT_SKIP_TT_TRAIN: ${{ inputs.skip-tt-train }}
+          INPUT_BUILD_TYPE: ${{ inputs.build-type }}
+          INPUT_TOOLCHAIN: ${{ inputs.toolchain }}
+          INPUT_TRACY: ${{ inputs.tracy }}
+          INPUT_DISTRIBUTED: ${{ inputs.distributed }}
+          INPUT_PROFILE: ${{ inputs.profile }}
+          INPUT_BUILD_UMD_TESTS: ${{ inputs.build-umd-tests }}
         run: |
           set -eu # basic shell hygiene
 
-          args_fixme=$([ "${{ inputs.skip-tt-train }}" = "true" ] && echo "--build-metal-tests --build-ttnn-tests --build-programming-examples" || echo "--build-all")
+          args_fixme=$([ "$INPUT_SKIP_TT_TRAIN" = "true" ] && echo "--build-metal-tests --build-ttnn-tests --build-programming-examples" || echo "--build-all")
           echo "Args: ${args_fixme}"
-          build_command="./build_metal.sh --build-dir build --build-type ${{ inputs.build-type }} --toolchain-path ${{ inputs.toolchain }} ${args_fixme} --enable-ccache --configure-only"
-          echo "Build tracy: ${{ inputs.tracy }}"
-          if [ "${{ inputs.tracy }}" = "false" ]; then
+          build_command="./build_metal.sh --build-dir build --build-type $INPUT_BUILD_TYPE --toolchain-path $INPUT_TOOLCHAIN ${args_fixme} --enable-ccache --configure-only"
+          echo "Build tracy: $INPUT_TRACY"
+          if [ "$INPUT_TRACY" = "false" ]; then
             build_command="$build_command --disable-profiler"
           fi
-          echo "Build distributed: ${{ inputs.distributed }}"
-          if [ "${{ inputs.distributed }}" = "false" ]; then
+          echo "Build distributed: $INPUT_DISTRIBUTED"
+          if [ "$INPUT_DISTRIBUTED" = "false" ]; then
             build_command="$build_command --without-distributed"
           fi
-          if [ "${{ inputs.profile }}" = "true" ]; then
+          if [ "$INPUT_PROFILE" = "true" ]; then
             build_command="$build_command --enable-time-trace --disable-unity-builds"
           fi
-          if [ "${{ inputs.build-umd-tests }}" = "true" ]; then
+          if [ "$INPUT_BUILD_UMD_TESTS" = "true" ]; then
             build_command="$build_command --build-umd-tests"
           fi
 
@@ -299,22 +315,31 @@ jobs:
 
       - name: 'Tar files'
         if: ${{ inputs.publish-artifact }}
+        env:
+          INPUT_SKIP_TT_TRAIN: ${{ inputs.skip-tt-train }}
         run: |
           ARTIFACT_PATHS="ttnn/ttnn/*.so build/lib build/programming_examples build/test build/tools runtime"
-          if [[ "${{ inputs.skip-tt-train }}" != "true" ]]; then
+          if [[ "$INPUT_SKIP_TT_TRAIN" != "true" ]]; then
             ARTIFACT_PATHS="$ARTIFACT_PATHS build/tt-train data"
           fi
           tar -I 'zstd --adapt=min=9 -T0' -cvhf /work/ttm_any.tar.zst $ARTIFACT_PATHS
 
       - name: Set build artifact name
         id: set_build_artifact_name
+        env:
+          INPUT_TOOLCHAIN: ${{ inputs.toolchain }}
+          INPUT_REF: ${{ inputs.ref || github.sha }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_ARCHITECTURE: ${{ inputs.architecture }}
+          INPUT_TRACY_SUFFIX: ${{ (inputs.tracy && '_profiler') || '' }}
+          INPUT_DISTRIBUTED_SUFFIX: ${{ (inputs.distributed == false && '_no_distributed') || '' }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          TOOLCHAIN_CLEANED=$(echo "${{ inputs.toolchain }}" | sed -E 's/^cmake\///; s/-toolchain\.cmake$//')
+          TOOLCHAIN_CLEANED=$(echo "$INPUT_TOOLCHAIN" | sed -E 's/^cmake\///; s/-toolchain\.cmake$//')
           # Use full sanitized ref/SHA and workflow run ID to ensure uniqueness across parallel builds
           # Sanitize ref/SHA by replacing invalid characters with hyphens
-          RAW_REF="${{ inputs.ref || github.sha }}"
-          SANITIZED_REF=$(echo "$RAW_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
-          BUILD_ARTIFACT_NAME="TTMetal_build_any_${{ inputs.version }}_${{ inputs.architecture }}_${TOOLCHAIN_CLEANED}${{ (inputs.tracy && '_profiler') || '' }}${{ (inputs.distributed == false && '_no_distributed') || '' }}_${SANITIZED_REF}_${{ github.run_id }}"
+          SANITIZED_REF=$(echo "$INPUT_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
+          BUILD_ARTIFACT_NAME="TTMetal_build_any_${INPUT_VERSION}_${INPUT_ARCHITECTURE}_${TOOLCHAIN_CLEANED}${INPUT_TRACY_SUFFIX}${INPUT_DISTRIBUTED_SUFFIX}_${SANITIZED_REF}_${GITHUB_RUN_ID}"
           echo "build_artifact_name=$BUILD_ARTIFACT_NAME" >> "$GITHUB_ENV"
           echo "build_artifact_name=$BUILD_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
 
@@ -344,14 +369,16 @@ jobs:
     steps:
       - name: Set Python version based on OS version
         id: set_python_version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ inputs.version }}" = "22.04" ]; then
+          if [ "$INPUT_VERSION" = "22.04" ]; then
             PYTHON_VERSION="3.10"
           else
             PYTHON_VERSION="3.12"
           fi
           echo "python_version=${PYTHON_VERSION}" >> $GITHUB_OUTPUT
-          echo "Selected Python ${PYTHON_VERSION} for Ubuntu ${{ inputs.version }}"
+          echo "Selected Python ${PYTHON_VERSION} for Ubuntu $INPUT_VERSION"
 
       - name: Check Redis credentials
         # Failing internal jobs draws attention immediately so we can fix them and make them fast.
@@ -380,8 +407,10 @@ jobs:
           python-version: '3.12'
 
       - name: Configure Tracy profiler and ttnn wheel import testing
+        env:
+          INPUT_TRACY: ${{ inputs.tracy }}
         run: |
-          if [ "${{ inputs.tracy }}" = "true" ]; then
+          if [ "$INPUT_TRACY" = "true" ]; then
             echo "ENABLE_TRACY_BUILD=ON" >> $GITHUB_ENV
             echo "Building with Tracy profiler enabled"
           else
@@ -408,13 +437,20 @@ jobs:
 
       - name: Set wheel artifact name
         id: set_wheel_artifact_name
+        env:
+          STEP_OUTPUT_PYTHON_VERSION: ${{ steps.set_python_version.outputs.python_version }}
+          INPUT_REF: ${{ inputs.ref || github.sha }}
+          INPUT_DISTRO: ${{ inputs.distro }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TRACY_SUFFIX: ${{ (inputs.tracy && '-profiler') || '' }}
+          INPUT_DISTRIBUTED_SUFFIX: ${{ (inputs.distributed == false && '-no-distributed') || '' }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          PYTHON_VERSION_NODOT=$(echo "${{ steps.set_python_version.outputs.python_version }}" | tr -d '.')
+          PYTHON_VERSION_NODOT=$(echo "$STEP_OUTPUT_PYTHON_VERSION" | tr -d '.')
           # Use full sanitized ref/SHA and workflow run ID to ensure uniqueness across parallel builds
           # Sanitize ref/SHA by replacing invalid characters with hyphens
-          RAW_REF="${{ inputs.ref || github.sha }}"
-          SANITIZED_REF=$(echo "$RAW_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
-          WHEEL_ARTIFACT_NAME="eager-dist-cp${PYTHON_VERSION_NODOT}-${{ inputs.distro }}-${{ inputs.version }}-any${{ (inputs.tracy && '-profiler') || '' }}${{ (inputs.distributed == false && '-no-distributed') || '' }}-${SANITIZED_REF}-${{ github.run_id }}"
+          SANITIZED_REF=$(echo "$INPUT_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
+          WHEEL_ARTIFACT_NAME="eager-dist-cp${PYTHON_VERSION_NODOT}-${INPUT_DISTRO}-${INPUT_VERSION}-any${INPUT_TRACY_SUFFIX}${INPUT_DISTRIBUTED_SUFFIX}-${SANITIZED_REF}-${GITHUB_RUN_ID}"
           echo "wheel_artifact_name=${WHEEL_ARTIFACT_NAME}" >> $GITHUB_OUTPUT
           echo "wheel_artifact_name=${WHEEL_ARTIFACT_NAME}" >> "$GITHUB_ENV"
 
