@@ -21,6 +21,8 @@ on:
       - "apc nightly debug run"
     types:
       - completed
+    branches:
+      - main
 
 jobs:
   auto-retry:
