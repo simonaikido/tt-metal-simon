@@ -35,9 +35,11 @@ jobs:
       - name: Parse input
         id: parse_input
         shell: bash
+        env:
+          INPUT_SOURCE: ${{ github.event.inputs.source }}
         run: |
           # Expect input format: <fork_owner>:<branch>
-          IFS=":" read -r FORK_OWNER SRC_BRANCH <<< "${{ github.event.inputs.source }}"
+          IFS=":" read -r FORK_OWNER SRC_BRANCH <<< "$INPUT_SOURCE"
           if [ -z "$FORK_OWNER" ] || [ -z "$SRC_BRANCH" ]; then
             echo "Error: Input must be in the format <fork_owner>:<branch>"
             exit 1
@@ -72,10 +74,12 @@ jobs:
       - name: Create or update local branch from fork branch
         id: create_branch
         shell: bash
+        env:
+          INPUT_TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
         run: |
           # Determine the target branch name.
-          if [ -n "${{ github.event.inputs.target_branch }}" ]; then
-            TARGET_BRANCH="${{ github.event.inputs.target_branch }}"
+          if [ -n "$INPUT_TARGET_BRANCH" ]; then
+            TARGET_BRANCH="$INPUT_TARGET_BRANCH"
           else
             TARGET_BRANCH="mirror/${{ steps.parse_input.outputs.fork_owner }}/${{ steps.parse_input.outputs.src_branch }}"
           fi
