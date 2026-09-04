@@ -16,51 +16,6 @@ on:
         description: "Upload data to datastore cluster for our dashboard"
         default: false
         type: boolean
-  workflow_run:
-    workflows:
-      - "All post-commit tests"
-      - "(Single-card) Model perf tests"
-      - "(Single-card) Device perf regressions"
-      - "(Single-card) Demo tests"
-      - "(Single-card) Tests for new models"
-      - "(Single-card) Fast dispatch frequent tests"
-      - "(Single-card) Frequent model and ttnn tests"
-      - "(T3K) T3000 demo tests"
-      - "(T3K) T3000 frequent tests"
-      - "(T3K) T3000 model perf tests"
-      - "(T3K) T3000 nightly tests"
-      - "(T3K) T3000 perplexity tests"
-      - "(T3K) T3000 profiler tests"
-      - "(T3K) T3000 unit tests"
-      - "(T3K) T3000 fast tests"
-      - "(T3K) Choose your pipeline"
-      - "(Galaxy) Choose your pipeline"
-      - "ttnn - Run sweeps"
-      - "Blackhole post-commit tests"
-      - "(Blackhole) Blackhole nightly tests"
-      - "(Blackhole) Demo tests"
-      - "(Blackhole) LLMBox unit tests"
-      - "PR Gate"
-      - "Merge Gate"
-      - "Nightly tt-metal L2 tests"
-      - "Package and release"
-      - "Build test and publish upstream tests"
-      - "Multi-Host Deployment (Physical)"
-      - "(Galaxy) Multi-user Isolation Tests"
-      - "(Galaxy) demo tests"
-      - "(Galaxy) frequent tests"
-      - "(Galaxy) model perf tests"
-      - "(Galaxy) nightly tests"
-      - "(Galaxy) profiler tests"
-      - "(Galaxy) Stress"
-      - "(Galaxy) unit tests"
-      - "Git bisect dispatch"
-      - "(Galaxy) Quick"
-      - "(Galaxy) APC fast tests"
-      - "(Galaxy) DeepSeek tests"
-
-    types:
-      - completed
 
 jobs:
   produce-cicd-data:
