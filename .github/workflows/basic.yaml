@@ -45,9 +45,11 @@ jobs:
           path: /work/pkgs/
 
       - name: Install packages
+        env:
+          PRODUCT: ${{ inputs.product }}
         run: |
-          # Ideally only ${{ inputs.product }}-validation, but APT doesn't resolve dependencies from files on disk without being told about them.
-          apt install -y ./pkgs/tt-metalium_*.deb ./pkgs/tt-metalium-jit_*.deb ./pkgs/${{ inputs.product }}_*.deb ./pkgs/${{ inputs.product }}-validation_*.deb
+          # Ideally only $PRODUCT-validation, but APT doesn't resolve dependencies from files on disk without being told about them.
+          apt install -y ./pkgs/tt-metalium_*.deb ./pkgs/tt-metalium-jit_*.deb ./pkgs/$PRODUCT_*.deb ./pkgs/$PRODUCT-validation_*.deb
 
       - name: Run a test
         id: test
@@ -59,8 +61,9 @@ jobs:
           TT_METAL_WATCHER: 5
           TT_METAL_WATCHER_TEST_MODE: 1
           LSAN_OPTIONS: suppressions=/usr/share/tt-metalium/lsan.supp
+          PRODUCT: ${{ inputs.product }}
         run: |
-          /usr/bin/${{ inputs.product }}-validation-basic
+          /usr/bin/$PRODUCT-validation-basic
 
       - name: workaround
         run: |

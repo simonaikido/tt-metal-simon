@@ -48,8 +48,9 @@ jobs:
     steps:
       - name: Parse tests-json to comma-separated string
         id: parse
+        env:
+          TESTS_JSON: ${{ inputs.tests-json }}
         run: |
-          TESTS_JSON='${{ inputs.tests-json }}'
           TESTS=$(echo "$TESTS_JSON" | jq -r 'to_entries | map(select(.value == true) | .key) | join(",")')
           echo "tests_to_run=$TESTS" >> $GITHUB_OUTPUT
 
