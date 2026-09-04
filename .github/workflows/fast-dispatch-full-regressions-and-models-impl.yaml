@@ -33,6 +33,8 @@ jobs:
     steps:
       - id: ctm
         shell: bash
+        env:
+          MODELS_TO_RUN: ${{ inputs.models-to-run }}
         run: |
           set -euo pipefail
 
@@ -93,7 +95,7 @@ jobs:
             {"model":"mamba 6","cmd":"pytest --timeout 900 -n auto tests/nightly/single_card/mamba --splits 6 --group 6"}
           ]'
 
-          SEL='${{ inputs.models-to-run }}'
+          SEL="${MODELS_TO_RUN}"
           echo "SEL raw: ${SEL}"
           echo "${SEL}" | jq -e type && echo "Looks like valid JSON" || echo "Not JSON"
 

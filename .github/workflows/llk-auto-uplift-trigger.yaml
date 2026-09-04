@@ -487,11 +487,14 @@ jobs:
       - name: Finalize PR
         env:
           GH_TOKEN: ${{ secrets.TEMP_METAL_PAT }}
+          INPUT_RECHECK_TESTS: ${{ inputs.recheck_tests }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          PR_NUMBER_VALUE: ${{ inputs.recheck_tests == true && needs.recheck-tests.outputs.pr-number || needs.update-submodule.outputs.pr-number }}
         run: |
-          PR_NUMBER="${{ inputs.recheck_tests == true && needs.recheck-tests.outputs.pr-number || needs.update-submodule.outputs.pr-number }}"
+          PR_NUMBER="$PR_NUMBER_VALUE"
 
           # Mark as ready if needed
-          if [ "${{ inputs.draft }}" = "true" ] || [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          if [ "$INPUT_DRAFT" = "true" ] || [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             echo "Marking PR as ready for review"
             if gh pr ready "$PR_NUMBER" --repo "${{ github.repository }}" 2>/dev/null; then
               echo "ℹ️ PR converted to ready-for-review"
@@ -502,22 +505,22 @@ jobs:
           # Build test status for PR body update
           TEST_STATUS="### 🧪 Test Status"$'\n'
 
-          if [ "${{ inputs.recheck_tests }}" = "true" ]; then
+          if [ "$INPUT_RECHECK_TESTS" = "true" ]; then
             TEST_STATUS+="**Workflow Results (Re-checked):**"$'\n'
           else
             TEST_STATUS+="**Workflow Results:**"$'\n'
           fi
 
           # Get PR creation time to filter runs created after PR
-          if [ "${{ inputs.recheck_tests }}" != "true" ]; then
+          if [ "$INPUT_RECHECK_TESTS" != "true" ]; then
             PR_CREATED_AT=$(gh pr view "$PR_NUMBER" --json createdAt --jq '.createdAt' --repo "${{ github.repository }}")
             echo "PR created at: $PR_CREATED_AT"
           fi
 
           # Collect workflow results
-          if [ "${{ needs.update-submodule.outputs.should-run-wormhole || 'false' }}" = "true" ] || [ "${{ inputs.recheck_tests }}" = "true" ]; then
+          if [ "${{ needs.update-submodule.outputs.should-run-wormhole || 'false' }}" = "true" ] || [ "$INPUT_RECHECK_TESTS" = "true" ]; then
             # Get Wormhole workflow results (filter by PR creation time if not recheck)
-            if [ "${{ inputs.recheck_tests }}" = "true" ]; then
+            if [ "$INPUT_RECHECK_TESTS" = "true" ]; then
               WH_RUNS=$(gh run list --workflow "all-post-commit-workflows.yaml" --branch "${{ env.BRANCH_NAME }}" --limit 5 --json conclusion,url,status --jq 'map(select(.status == "completed")) | .[0] // empty' --repo "${{ github.repository }}")
             else
               WH_RUNS=$(gh run list --workflow "all-post-commit-workflows.yaml" --branch "${{ env.BRANCH_NAME }}" --limit 5 --json conclusion,url,status,createdAt --jq "map(select(.status == \"completed\" and .createdAt >= \"$PR_CREATED_AT\")) | .[0] // empty" --repo "${{ github.repository }}")
@@ -529,7 +532,7 @@ jobs:
             fi
 
             # Get TT-Metal L2 Nightly APC workflow results (filter by PR creation time if not recheck)
-            if [ "${{ inputs.recheck_tests }}" = "true" ]; then
+            if [ "$INPUT_RECHECK_TESTS" = "true" ]; then
               L2_RUNS=$(gh run list --workflow "tt-metal-l2-nightly.yaml" --branch "${{ env.BRANCH_NAME }}" --limit 5 --json conclusion,url,status --jq 'map(select(.status == "completed")) | .[0] // empty' --repo "${{ github.repository }}")
             else
               L2_RUNS=$(gh run list --workflow "tt-metal-l2-nightly.yaml" --branch "${{ env.BRANCH_NAME }}" --limit 5 --json conclusion,url,status,createdAt --jq "map(select(.status == \"completed\" and .createdAt >= \"$PR_CREATED_AT\")) | .[0] // empty" --repo "${{ github.repository }}")
@@ -541,9 +544,9 @@ jobs:
             fi
           fi
 
-          if [ "${{ needs.update-submodule.outputs.should-run-blackhole || 'false' }}" = "true" ] || [ "${{ inputs.recheck_tests }}" = "true" ]; then
+          if [ "${{ needs.update-submodule.outputs.should-run-blackhole || 'false' }}" = "true" ] || [ "$INPUT_RECHECK_TESTS" = "true" ]; then
             # Get Blackhole workflow results (filter by PR creation time if not recheck)
-            if [ "${{ inputs.recheck_tests }}" = "true" ]; then
+            if [ "$INPUT_RECHECK_TESTS" = "true" ]; then
               BH_RUNS=$(gh run list --workflow "blackhole-post-commit.yaml" --branch "${{ env.BRANCH_NAME }}" --limit 5 --json conclusion,url,status --jq 'map(select(.status == "completed")) | .[0] // empty' --repo "${{ github.repository }}")
             else
               BH_RUNS=$(gh run list --workflow "blackhole-post-commit.yaml" --branch "${{ env.BRANCH_NAME }}" --limit 5 --json conclusion,url,status,createdAt --jq "map(select(.status == \"completed\" and .createdAt >= \"$PR_CREATED_AT\")) | .[0] // empty" --repo "${{ github.repository }}")
@@ -556,7 +559,7 @@ jobs:
           fi
 
           # If no workflows were run
-          if [ "${{ needs.update-submodule.outputs.should-run-wormhole || 'false' }}" = "false" ] && [ "${{ needs.update-submodule.outputs.should-run-blackhole || 'false' }}" = "false" ] && [ "${{ inputs.recheck_tests }}" != "true" ]; then
+          if [ "${{ needs.update-submodule.outputs.should-run-wormhole || 'false' }}" = "false" ] && [ "${{ needs.update-submodule.outputs.should-run-blackhole || 'false' }}" = "false" ] && [ "$INPUT_RECHECK_TESTS" != "true" ]; then
             TEST_STATUS+="- ℹ️ **No architecture-specific tests required** - No Wormhole or Blackhole tests were run"$'\n'
           fi
 
@@ -574,7 +577,7 @@ jobs:
 
           # Enable auto-merge
           echo "🔄 Enabling auto-merge for PR #$PR_NUMBER"
-          if [ "${{ inputs.recheck_tests }}" != "true" ]; then
+          if [ "$INPUT_RECHECK_TESTS" != "true" ]; then
             gh pr merge "$PR_NUMBER" --auto --squash --subject "chore: update LLK submodule to ${{ needs.update-submodule.outputs.new-sha }}" --repo "${{ github.repository }}" || echo "⚠️ Could not enable auto-merge (may require additional permissions)"
           else
             gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}" || echo "⚠️ Could not enable auto-merge (may require additional permissions)"
