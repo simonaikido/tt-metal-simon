@@ -9,10 +9,11 @@ runs:
   using: "composite"
   steps:
     - name: Set CPU governor to ${{ inputs.governor }}
+      env:
+        governor: ${{ inputs.governor }}
       run: |
         set -euo pipefail
 
-        governor="${{ inputs.governor }}"
         echo "🔧 Setting CPU governor to: $governor for all cores"
 
         # Set governor for all CPU cores by writing directly to sysfs
