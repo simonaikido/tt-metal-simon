@@ -75,7 +75,7 @@ runs:
       shell: bash
       run: |
         docker pull ${{ env.TT_METAL_DOCKER_IMAGE_TAG }}
-    - uses: tenstorrent/docker-run-action@v6
+    - uses: tenstorrent/docker-run-action@e6b2d2d495b37fbab2992f082a0b8eeaa3b471fc # v6
       with:
         shell: bash
         username: ${{ inputs.docker_username }}
