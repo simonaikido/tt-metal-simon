@@ -11,10 +11,12 @@ runs:
   steps:
     - name: Cleanup
       shell: bash
+      env:
+        PATH_TO_CLEAN: ${{ inputs.path }}
       run: |
         cd /
         echo "pre rm"
-        ls -al "${{ inputs.path }}"
-        rm -rf "${{ inputs.path }}"
+        ls -al "$PATH_TO_CLEAN"
+        rm -rf "$PATH_TO_CLEAN"
         echo "post rm"
-        ls -al "$(dirname "${{ inputs.path }}")"
+        ls -al "$(dirname "$PATH_TO_CLEAN")"
