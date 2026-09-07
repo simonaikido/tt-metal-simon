@@ -46,8 +46,9 @@ runs:
     - name: Get workflow run info
       id: run-info
       shell: bash
+      env:
+        WORKFLOW_RUN_ID: ${{ inputs.workflow_run_id }}
       run: |
-        WORKFLOW_RUN_ID="${{ inputs.workflow_run_id }}"
         echo "Fetching artifacts from workflow run: $WORKFLOW_RUN_ID"
 
         # Get workflow run details
@@ -68,8 +69,9 @@ runs:
     - name: List available artifacts
       id: list-artifacts
       shell: bash
+      env:
+        WORKFLOW_RUN_ID: ${{ inputs.workflow_run_id }}
       run: |
-        WORKFLOW_RUN_ID="${{ inputs.workflow_run_id }}"
         ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/runs/"$WORKFLOW_RUN_ID"/artifacts --jq '.artifacts[].name' 2>&1)
 
         if [ $? -ne 0 ]; then
@@ -87,11 +89,11 @@ runs:
     - name: Download artifacts
       id: download
       shell: bash
+      env:
+        WORKFLOW_RUN_ID: ${{ inputs.workflow_run_id }}
+        WORK_DIR: ${{ inputs.working-directory }}
+        TRACY_ENABLED: ${{ inputs.tracy }}
       run: |
-        WORKFLOW_RUN_ID="${{ inputs.workflow_run_id }}"
-        WORK_DIR="${{ inputs.working-directory }}"
-        TRACY_ENABLED="${{ inputs.tracy }}"
-
         mkdir -p "$WORK_DIR"
         cd "$WORK_DIR"
 
