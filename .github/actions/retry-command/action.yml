@@ -18,17 +18,22 @@ runs:
   steps:
     - name: "Invoke command with retries"
       shell: bash
+      env:
+        MAX_RETRIES: ${{ inputs.max-retries }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        COMMAND: ${{ inputs.command }}
+        BACKOFF_SECONDS: ${{ inputs.backoff-seconds }}
       run: |
         set +e
 
-        max_retries="${{ inputs.max-retries }}"
+        max_retries="$MAX_RETRIES"
         count=0
 
         while (( count < max_retries )); do
           echo "Attempt $((count + 1)) of $max_retries..."
 
           # Execute the command with timeout
-          if timeout ${{ inputs.timeout-seconds }} "${{ inputs.command }}"; then
+          if timeout $TIMEOUT_SECONDS "$COMMAND"; then
             echo "Command succeeded."
             exit 0
           else
@@ -37,7 +42,7 @@ runs:
           fi
 
           # Optional: Add a delay between retries
-          sleep ${{ inputs.backoff-seconds }}
+          sleep $BACKOFF_SECONDS
         done
 
         echo "Command failed after $max_retries attempts."
