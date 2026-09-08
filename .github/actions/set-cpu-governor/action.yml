@@ -9,11 +9,12 @@ runs:
   using: "composite"
   steps:
     - name: Set CPU governor to ${{ inputs.governor }}
+      env:
+        GOVERNOR: ${{ inputs.governor }}
       run: |
         set -euo pipefail
 
-        governor="${{ inputs.governor }}"
-        echo "🔧 Setting CPU governor to: $governor for all cores"
+        echo "🔧 Setting CPU governor to: $GOVERNOR for all cores"
 
         # Check if scaling_governor exists (may not on VMs)
         shopt -s nullglob
@@ -27,10 +28,10 @@ runs:
         fi
 
         # Set governor for all CPU cores by writing directly to sysfs
-        if echo "$governor" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null; then
-          echo "✅ Successfully set $governor governor for all CPU cores"
+        if echo "$GOVERNOR" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null; then
+          echo "✅ Successfully set $GOVERNOR governor for all CPU cores"
         else
-          echo "❌ Failed to set $governor governor"
+          echo "❌ Failed to set $GOVERNOR governor"
           exit 1
         fi
 
