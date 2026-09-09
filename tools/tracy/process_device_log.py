@@ -10,6 +10,7 @@ import inspect
 import csv
 import json
 from datetime import datetime
+import ast
 
 import pandas as pd
 import numpy as np
@@ -325,13 +326,13 @@ def get_dispatch_core_ops(timeseries):
 
         if "meta_data" in timerID and "workers_runtime_id" in timerID["meta_data"]:
             riscData[risc]["opFinished"] = False
-            riscData[risc]["opID"] = eval(timerID["meta_data"])["workers_runtime_id"]
+            riscData[risc]["opID"] = ast.literal_eval(timerID["meta_data"])["workers_runtime_id"]
             # Only record first trace
             if riscData[risc]["opID"] in riscData[risc]["ops"]:
                 riscData[risc]["opID"] = 0
 
         if "meta_data" in timerID and "dispatch_command_type" in timerID["meta_data"]:
-            riscData[risc]["cmdType"] = eval(timerID["meta_data"])["dispatch_command_type"]
+            riscData[risc]["cmdType"] = ast.literal_eval(timerID["meta_data"])["dispatch_command_type"]
             if "CQ_DISPATCH_NOTIFY_SUBORDINATE_GO_SIGNAL" in riscData[risc]["cmdType"]:
                 riscData[risc]["opFinished"] = True
 
