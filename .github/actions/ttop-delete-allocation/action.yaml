@@ -11,5 +11,7 @@ runs:
   steps:
     - name: Delete Allocation
       shell: bash
+      env:
+        ALLOCATION_NAME: ${{ inputs.allocationName }}
       run: |
-        kubectl delete allocation/${{ inputs.allocationName }} --ignore-not-found
+        kubectl delete allocation/$ALLOCATION_NAME --ignore-not-found

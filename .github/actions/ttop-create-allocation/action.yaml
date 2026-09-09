@@ -23,17 +23,20 @@ runs:
       shell: bash
       id: explicit
       if: ${{ inputs.explicit != '' }}
+      env:
+        ALLOCATION_NAME: ${{ inputs.allocationName }}
+        EXPLICIT_NODES: ${{ inputs.explicit }}
       run: |
         cat <<EOF >> $GITHUB_ENV
         ALLOCATION_MANIFEST<<ALLOCATION_EOF
         apiVersion: tenstorrent.com/v1alpha1
         kind: Allocation
         metadata:
-          name: ${{ inputs.allocationName }}
+          name: $ALLOCATION_NAME
         spec:
           retryPolicy: Always
           allocationType: Explicit
-          explicit: [${{ inputs.explicit }}]
+          explicit: [$EXPLICIT_NODES]
         ALLOCATION_EOF
         EOF
 
@@ -41,14 +44,17 @@ runs:
       shell: bash
       id: spec
       if: ${{ inputs.spec != '' }}
+      env:
+        ALLOCATION_NAME: ${{ inputs.allocationName }}
+        SPEC_INPUT: ${{ inputs.spec }}
       run: |
-        SPEC=$(printf '%s\n' '${{ inputs.spec }}' | sed 's/^/  /')
+        SPEC=$(printf '%s\n' "$SPEC_INPUT" | sed 's/^/  /')
         cat <<EOF >> $GITHUB_ENV
         ALLOCATION_MANIFEST<<ALLOCATION_EOF
         apiVersion: tenstorrent.com/v1alpha1
         kind: Allocation
         metadata:
-          name: ${{ inputs.allocationName }}
+          name: $ALLOCATION_NAME
         spec:
           retryPolicy: Always
         ${SPEC}
@@ -63,6 +69,8 @@ runs:
 
     - name: Wait for allocation
       shell: bash
+      env:
+        ALLOCATION_NAME: ${{ inputs.allocationName }}
       run: |
         echo "Waiting for allocation to be ready..."
-        kubectl wait --for=jsonpath='{.status.phase}'=Allocated allocation/${{ inputs.allocationName }} --timeout=999m
+        kubectl wait --for=jsonpath='{.status.phase}'=Allocated allocation/$ALLOCATION_NAME --timeout=999m
