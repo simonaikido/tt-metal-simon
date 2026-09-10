@@ -22,22 +22,30 @@ runs:
   steps:
     - name: Create key file
       shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
       run: |
         # Change dir to path if its set
         # If provided, generate key file in inputs.path location for the upload step
-        if [ -n "${{ inputs.path }}" ]; then
-          echo "Changing dir to ${{ inputs.path }}"
-          cd "${{ inputs.path }}"
+        if [ -n "$INPUT_PATH" ]; then
+          echo "Changing dir to $INPUT_PATH"
+          cd "$INPUT_PATH"
         fi
-        echo "${{ inputs.ssh-private-key }}" > id_key
+        echo "$INPUT_SSH_PRIVATE_KEY" > id_key
         chmod go-rwx id_key
     - name: Upload files
       shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_SFTP_BATCHFILE: ${{ inputs.sftp-batchfile }}
+        INPUT_USERNAME: ${{ inputs.username }}
+        INPUT_HOSTNAME: ${{ inputs.hostname }}
       run: |
         # Change dir to path if its set
         # Example: when running in containers the batchfile and data files are located under /work
-        if [ -n "${{ inputs.path }}" ]; then
-          echo "Changing dir to ${{ inputs.path }}"
-          cd "${{ inputs.path }}"
+        if [ -n "$INPUT_PATH" ]; then
+          echo "Changing dir to $INPUT_PATH"
+          cd "$INPUT_PATH"
         fi
-        sftp  -oStrictHostKeyChecking=no -i id_key -b ${{ inputs.sftp-batchfile }} ${{ inputs.username }}@${{ inputs.hostname }}
+        sftp  -oStrictHostKeyChecking=no -i id_key -b $INPUT_SFTP_BATCHFILE $INPUT_USERNAME@$INPUT_HOSTNAME
