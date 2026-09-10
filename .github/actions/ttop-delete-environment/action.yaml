@@ -11,5 +11,7 @@ runs:
   steps:
     - name: Delete Environment
       shell: bash
+      env:
+        ENVIRONMENT_NAME: ${{ inputs.environmentName }}
       run: |
-        kubectl -nttop delete helmrelease/${{ inputs.environmentName }} --ignore-not-found
+        kubectl -nttop delete helmrelease/$ENVIRONMENT_NAME --ignore-not-found
