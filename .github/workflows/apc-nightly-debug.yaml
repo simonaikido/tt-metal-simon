@@ -44,8 +44,11 @@ jobs:
       enable-watcher: ${{ steps.check.outputs.enable-watcher }}
     steps:
       - id: check
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          ENABLE_WATCHER: ${{ inputs.enable-watcher }}
         run: |
-          if [[ "${{ github.event.schedule }}" == "0 1 * * *" || "${{ inputs.enable-watcher }}" == "true" ]]; then
+          if [[ "$SCHEDULE" == "0 1 * * *" || "$ENABLE_WATCHER" == "true" ]]; then
             echo "enable-watcher=true" >> "$GITHUB_OUTPUT"
           else
             echo "enable-watcher=false" >> "$GITHUB_OUTPUT"
