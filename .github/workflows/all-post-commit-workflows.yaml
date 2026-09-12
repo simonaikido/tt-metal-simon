@@ -209,27 +209,34 @@ jobs:
       wheel-artifact-name: ${{ steps.resolve.outputs.wheel-artifact-name }}
     steps:
       - id: resolve
+        env:
+          INPUT_DEV_DOCKER_IMAGE: ${{ inputs.dev-docker-image }}
+          INPUT_BUILD_ARTIFACT_NAME: ${{ inputs.build-artifact-name }}
+          INPUT_WHEEL_ARTIFACT_NAME: ${{ inputs.wheel-artifact-name }}
+          BUILT_DEV_DOCKER_IMAGE: ${{ needs.build-artifact.outputs.dev-docker-image }}
+          BUILT_BUILD_ARTIFACT_NAME: ${{ needs.build-artifact.outputs.build-artifact-name }}
+          BUILT_WHEEL_ARTIFACT_NAME: ${{ needs.build-artifact.outputs.wheel-artifact-name }}
         run: |
           # Validate pre-built artifact inputs - all three must be provided together
-          if [[ -n "${{ inputs.dev-docker-image }}" || -n "${{ inputs.build-artifact-name }}" || -n "${{ inputs.wheel-artifact-name }}" ]]; then
-            if [[ -z "${{ inputs.dev-docker-image }}" || -z "${{ inputs.build-artifact-name }}" || -z "${{ inputs.wheel-artifact-name }}" ]]; then
+          if [[ -n "$INPUT_DEV_DOCKER_IMAGE" || -n "$INPUT_BUILD_ARTIFACT_NAME" || -n "$INPUT_WHEEL_ARTIFACT_NAME" ]]; then
+            if [[ -z "$INPUT_DEV_DOCKER_IMAGE" || -z "$INPUT_BUILD_ARTIFACT_NAME" || -z "$INPUT_WHEEL_ARTIFACT_NAME" ]]; then
               echo "Error: When using pre-built artifacts, all three inputs must be provided:"
-              echo "  - dev-docker-image: '${{ inputs.dev-docker-image }}'"
-              echo "  - build-artifact-name: '${{ inputs.build-artifact-name }}'"
-              echo "  - wheel-artifact-name: '${{ inputs.wheel-artifact-name }}'"
+              echo "  - dev-docker-image: '$INPUT_DEV_DOCKER_IMAGE'"
+              echo "  - build-artifact-name: '$INPUT_BUILD_ARTIFACT_NAME'"
+              echo "  - wheel-artifact-name: '$INPUT_WHEEL_ARTIFACT_NAME'"
               exit 1
             fi
           fi
 
           # Use provided artifacts if available, otherwise use built artifacts
-          if [[ -n "${{ inputs.dev-docker-image }}" ]]; then
-            echo "dev-docker-image=${{ inputs.dev-docker-image }}" >> "$GITHUB_OUTPUT"
-            echo "build-artifact-name=${{ inputs.build-artifact-name }}" >> "$GITHUB_OUTPUT"
-            echo "wheel-artifact-name=${{ inputs.wheel-artifact-name }}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$INPUT_DEV_DOCKER_IMAGE" ]]; then
+            echo "dev-docker-image=$INPUT_DEV_DOCKER_IMAGE" >> "$GITHUB_OUTPUT"
+            echo "build-artifact-name=$INPUT_BUILD_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+            echo "wheel-artifact-name=$INPUT_WHEEL_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
           else
-            echo "dev-docker-image=${{ needs.build-artifact.outputs.dev-docker-image }}" >> "$GITHUB_OUTPUT"
-            echo "build-artifact-name=${{ needs.build-artifact.outputs.build-artifact-name }}" >> "$GITHUB_OUTPUT"
-            echo "wheel-artifact-name=${{ needs.build-artifact.outputs.wheel-artifact-name }}" >> "$GITHUB_OUTPUT"
+            echo "dev-docker-image=$BUILT_DEV_DOCKER_IMAGE" >> "$GITHUB_OUTPUT"
+            echo "build-artifact-name=$BUILT_BUILD_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+            echo "wheel-artifact-name=$BUILT_WHEEL_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
           fi
 
   tests-to-run:
