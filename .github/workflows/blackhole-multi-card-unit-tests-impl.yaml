@@ -38,15 +38,19 @@ jobs:
     steps:
       - name: Generate filtered matrix
         id: generate
+        env:
+          RUNNER_LABEL_CONDITION: ${{ inputs.runner-label == 'BH-DeskBox' && '--min-connections 4' || '' }}
+          FAST_ONLY: ${{ inputs.fast-only }}
+          RUNNER_LABEL: ${{ inputs.runner-label }}
         run: |
           # Define all test groups as YAML (test-type: "fast" = run when fast-only; others run in full matrix)
           # Convert to JSON for jq filtering; multi-line cmd blocks stay readable
-          all_tests_yaml=$(cat <<'YAML_EOF'
+          all_tests_yaml=$(cat <<YAML_EOF
           - name: fabric fast unit tests (1D, 2D, system health)
             cmd: |
               ./build/test/tt_metal/tt_fabric/fabric_unit_tests --gtest_filter="Fabric1D*Fixture.*"
               ./build/test/tt_metal/tt_fabric/fabric_unit_tests --gtest_filter="Fabric2D*Fixture.*"
-              ./build/test/tt_metal/tt_fabric/test_system_health ${{ inputs.runner-label == 'BH-DeskBox' && '--min-connections 4' || '' }}
+              ./build/test/tt_metal/tt_fabric/test_system_health $RUNNER_LABEL_CONDITION
             timeout: 15
             test-type: fast
           - name: Sockets fast unit test
@@ -108,12 +112,10 @@ jobs:
           all_tests=$(echo "$all_tests_yaml" | ruby -r yaml -r json -e 'puts YAML.load(STDIN.read).to_json')
 
           # Filter: *-viommu test types run only when runner-label contains viommu; when fast_only, run only fast + fast-viommu (on viommu)
-          fast_only="${{ inputs.fast-only }}"
-          runner_label="${{ inputs.runner-label }}"
           viommu_json="false"
-          if [[ "$runner_label" == *viommu* ]]; then viommu_json="true"; fi
+          if [[ "$RUNNER_LABEL" == *viommu* ]]; then viommu_json="true"; fi
 
-          if [ "$fast_only" == "true" ]; then
+          if [ "$FAST_ONLY" == "true" ]; then
             filtered_tests=$(echo "$all_tests" | jq -c --argjson viommu "$viommu_json" '[.[] | select((.["test-type"] == "fast") or (.["test-type"] == "fast-viommu" and $viommu))]')
           else
             filtered_tests=$(echo "$all_tests" | jq -c --argjson viommu "$viommu_json" '[.[] | select((.["test-type"] != "fast-viommu" and .["test-type"] != "slow-viommu") or $viommu)]')
