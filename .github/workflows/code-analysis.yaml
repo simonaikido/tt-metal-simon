@@ -293,6 +293,8 @@ jobs:
 
       - name: 🔬 Analyze with CodeChecker
         id: codechecker
+        env:
+          DEBUG_FILE_FILTER: ${{ inputs.debug-file-filter }}
         run: |
           set -euo pipefail
 
@@ -308,9 +310,9 @@ jobs:
             --jobs $(nproc) \
             --config /work/.codechecker.json"
 
-          if [ -n "${{ inputs.debug-file-filter }}" ]; then
-            echo "🐛 DEBUG MODE: Analyzing only: ${{ inputs.debug-file-filter }}"
-            ANALYZE_CMD="$ANALYZE_CMD --file '${{ inputs.debug-file-filter }}'"
+          if [ -n "$DEBUG_FILE_FILTER" ]; then
+            echo "🐛 DEBUG MODE: Analyzing only: $DEBUG_FILE_FILTER"
+            ANALYZE_CMD="$ANALYZE_CMD --file '$DEBUG_FILE_FILTER'"
           fi
 
           # Run analysis (don't fail on analyzer crashes - common with static analysis)

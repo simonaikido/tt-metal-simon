@@ -395,18 +395,19 @@ jobs:
 
       - name: Set artifact name
         id: set-artifact-name
+        env:
+          RAW_REF: ${{ inputs.ref || github.sha }}
+          TRACY_SUFFIX: ${{ (inputs.tracy && '-profiler') || '' }}
+          DIST_SUFFIX: ${{ (inputs.distributed == false && '-no-distributed') || '' }}
+          ARCH: ${{ inputs.architecture }}
+          BUILD_TYPE: ${{ inputs.build-type }}
         run: |
           TOOLCHAIN_CLEANED=$(echo "${{ env.TOOLCHAIN }}" | sed -E 's/^cmake\///; s/-toolchain\.cmake$//')
           # Use full sanitized ref/SHA and workflow run ID to ensure uniqueness
           # Sanitize ref/SHA by replacing invalid characters with hyphens
-          RAW_REF="${{ inputs.ref || github.sha }}"
           SANITIZED_REF=$(echo "$RAW_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
-          TRACY_SUFFIX="${{ (inputs.tracy && '-profiler') || '' }}"
-          DIST_SUFFIX="${{ (inputs.distributed == false && '-no-distributed') || '' }}"
           DISTRO="${{ env.DISTRO }}"
           VERSION="${{ env.VERSION }}"
-          ARCH="${{ inputs.architecture }}"
-          BUILD_TYPE="${{ inputs.build-type }}"
           RUN_ID="${{ github.run_id }}"
           ARTIFACT_PARTS=(
             "packages"
@@ -457,10 +458,18 @@ jobs:
             cpm-
 
       - name: 🔧 CMake configure
+        env:
+          SKIP_TT_TRAIN: ${{ inputs.skip-tt-train }}
+          BUILD_TYPE: ${{ inputs.build-type }}
+          TRACY: ${{ inputs.tracy }}
+          DISTRIBUTED: ${{ inputs.distributed }}
+          PROFILE: ${{ inputs.profile }}
+          BUILD_UMD_TESTS: ${{ inputs.build-umd-tests }}
+          ENABLE_LTO: ${{ inputs.enable-lto }}
         run: |
           set -eu # basic shell hygiene
 
-          if [ "${{ inputs.skip-tt-train }}" = "true" ]; then
+          if [ "$SKIP_TT_TRAIN" = "true" ]; then
             args_fixme="--build-metal-tests --build-ttnn-tests --build-programming-examples"
           else
             args_fixme="--build-all"
@@ -470,28 +479,28 @@ jobs:
           build_args=(
             "./build_metal.sh"
             "--build-dir" "build"
-            "--build-type" "${{ inputs.build-type }}"
+            "--build-type" "$BUILD_TYPE"
             "--toolchain-path" "${{ env.TOOLCHAIN }}"
             ${args_fixme}
             "--enable-ccache"
             "--configure-only"
           )
 
-          echo "Build tracy: ${{ inputs.tracy }}"
-          if [ "${{ inputs.tracy }}" = "false" ]; then
+          echo "Build tracy: $TRACY"
+          if [ "$TRACY" = "false" ]; then
             build_args+=("--disable-profiler")
           fi
-          echo "Build distributed: ${{ inputs.distributed }}"
-          if [ "${{ inputs.distributed }}" = "false" ]; then
+          echo "Build distributed: $DISTRIBUTED"
+          if [ "$DISTRIBUTED" = "false" ]; then
             build_args+=("--without-distributed")
           fi
-          if [ "${{ inputs.profile }}" = "true" ]; then
+          if [ "$PROFILE" = "true" ]; then
             build_args+=("--enable-time-trace" "--disable-unity-builds")
           fi
-          if [ "${{ inputs.build-umd-tests }}" = "true" ]; then
+          if [ "$BUILD_UMD_TESTS" = "true" ]; then
             build_args+=("--build-umd-tests")
           fi
-          if [ "${{ inputs.enable-lto }}" = "true" ]; then
+          if [ "$ENABLE_LTO" = "true" ]; then
             build_args+=("--enable-lto")
           fi
           echo "build-artifact.yaml running: ${build_args[*]}"
@@ -542,25 +551,28 @@ jobs:
 
       - name: 'Tar files'
         if: ${{ inputs.publish-artifact }}
+        env:
+          SKIP_TT_TRAIN: ${{ inputs.skip-tt-train }}
         run: |
           ARTIFACT_PATHS="ttnn/ttnn/*.so build/lib build/programming_examples build/test build/tools runtime"
-          if [[ "${{ inputs.skip-tt-train }}" != "true" ]]; then
+          if [[ "$SKIP_TT_TRAIN" != "true" ]]; then
             ARTIFACT_PATHS="$ARTIFACT_PATHS build/tt-train data"
           fi
           tar -I 'zstd --adapt=min=9 -T0' -cvhf /work/ttm_any.tar.zst $ARTIFACT_PATHS
 
       - name: Set build artifact name
         id: set_build_artifact_name
+        env:
+          RAW_REF: ${{ inputs.ref || github.sha }}
+          TRACY_SUFFIX: ${{ (inputs.tracy && '_profiler') || '' }}
+          DIST_SUFFIX: ${{ (inputs.distributed == false && '_no_distributed') || '' }}
+          ARCH: ${{ inputs.architecture }}
         run: |
           TOOLCHAIN_CLEANED=$(echo "${{ env.TOOLCHAIN }}" | sed -E 's/^cmake\///; s/-toolchain\.cmake$//')
           # Use full sanitized ref/SHA and workflow run ID to ensure uniqueness
           # Sanitize ref/SHA by replacing invalid characters with hyphens
-          RAW_REF="${{ inputs.ref || github.sha }}"
           SANITIZED_REF=$(echo "$RAW_REF" | sed 's/[\/:"<>|*?\r\n\\]/-/g')
-          TRACY_SUFFIX="${{ (inputs.tracy && '_profiler') || '' }}"
-          DIST_SUFFIX="${{ (inputs.distributed == false && '_no_distributed') || '' }}"
           VERSION="${{ env.VERSION }}"
-          ARCH="${{ inputs.architecture }}"
           RUN_ID="${{ github.run_id }}"
           BUILD_ARTIFACT_PARTS=(
             "TTMetal_build_any"
