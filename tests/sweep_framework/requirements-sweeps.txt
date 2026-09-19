@@ -5,3 +5,5 @@ faster-fifo
 # For PostgreSQL database connectivity
 psycopg-binary == 3.2.9
 ijson
+
+urllib3==2.8.0
