@@ -4,3 +4,6 @@ tqdm
 numpy
 loguru
 pydantic
+
+h11==0.16.0
+urllib3==2.8.0
