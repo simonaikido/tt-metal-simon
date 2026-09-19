@@ -1,2 +1,4 @@
-gunicorn==21.2.0
-streamlit==1.40.1
+gunicorn==26.1.0
+streamlit==1.56.0
+
+urllib3==2.8.0
