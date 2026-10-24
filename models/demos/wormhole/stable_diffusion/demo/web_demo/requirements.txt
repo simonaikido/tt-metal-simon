@@ -1,2 +1,4 @@
-gunicorn==21.2.0
-streamlit==1.40.1
+gunicorn==26.1.0
+streamlit==1.66.1
+pillow>=13.0.0 # transitive dependency pinned by Aikido Autofix to remediate a vulnerability
+pandas>=3.0.4 # transitive dependency pinned by Aikido Autofix to remediate a vulnerability
