@@ -87,7 +87,7 @@ jobs:
           submodules: recursive
           clean: false
       - name: Link Checker
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@v2.0.2
         with:
           args: --verbose './README.md' './INSTALLING.md'  './docs/source/**/*.rst' './docs/source/**/*.md'
           fail: true
