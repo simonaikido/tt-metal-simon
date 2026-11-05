@@ -3,3 +3,4 @@ transformers
 tqdm
 numpy
 loguru
+pyarrow>=26.0.1 # transitive dependency pinned by Aikido Autofix to remediate a vulnerability
